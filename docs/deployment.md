@@ -20,7 +20,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install smartpv_support_agent-1.6.1-py3-none-any.whl
+pip install smartpv_support_agent-1.7.0-py3-none-any.whl
 ```
 
 装完先跑自检，把它当成部署门禁：
@@ -167,6 +167,7 @@ server {
 
 **首次部署需建立管理员账号。** 在应用工作目录运行 `python scripts/create_admin.py --generate`，保存只显示一次的密码。
 页面登录后服务端签发 HttpOnly 会话 Cookie；聊天、会话、导入和评测接口均按服务器验证的身份授权。
+admin 可在页面的「管理用户」创建、停用和重置 user 账号；user 只能使用问答、刷题、反馈、工单和自己的会话。
 生产环境仍需使用 HTTPS，并设置随机的 `CONFIRMATION_SECRET`。见 [SECURITY.md](../SECURITY.md)。
 
 ## 健康检查

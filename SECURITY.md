@@ -21,6 +21,7 @@
 | 上传限制 | `main.py` 的 `POST /documents` | 大小上限（`MAX_UPLOAD_BYTES`）+ 类型白名单 + SHA-256 去重 |
 | 登录身份 | `services/auth.py`、`/auth/*` | 密码哈希、数据库会话、HttpOnly Cookie、退出和改密；不信任浏览器自报的用户编号 |
 | 管理员权限 | `POST /documents`、`POST /evaluations/run` | 仅 admin 可以导入资料和运行评测 |
+| 用户账号管理 | `/admin/users` | 仅 admin 可创建、停用及重置 user；停用和重置会撤销已登录会话 |
 | 会话所有权 | `GET /sessions/{id}`、`GET /sessions` | 依照服务端登录身份过滤；admin 可查看历史会话 |
 | 审计 | `audit_logs` 表 | 写操作与令牌消费都留痕（`actor` / `action` / `resource` / `detail`） |
 | 密钥不外泄 | `config.py`、`cli.py` | 只从环境变量与 `.env` 读；`.env` 已 gitignore；`doctor` 只报「已配置」不打印内容 |
@@ -34,7 +35,7 @@
 
 ## 已知边界：不要误解这几条
 
-- **目前只有初始管理员账号的创建流程。** 普通 user 账号管理和企业统一登录尚未接入。
+- **目前使用本地账号。** 企业统一登录尚未接入；user 账号应由 admin 对照真实员工身份创建并交付初始密码。
 - **本地账号仅在 HTTPS 下可供远程人员使用。** 开发环境的本机 HTTP 仅供本机演示。
 - **限流是固定窗口、按用户计数。** 不配 `REDIS_URL` 时按进程计数，多 worker 部署下实际额度会按进程数放大。
 - **Redis 未设密码。** compose 里它只在容器网络内可达（没有把端口映射到宿主机）。换到共享网络请自行加认证。

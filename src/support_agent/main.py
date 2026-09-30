@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -50,12 +51,17 @@ from .schemas import (
     EvaluationResponse,
     FeedbackRequest,
     LoginRequest,
+    ManagedUser,
+    ManagedUserList,
     PasswordChangeRequest,
     QuizResponse,
     SessionListResponse,
     SessionResponse,
     TicketCreateRequest,
     TicketResponse,
+    UserCreateRequest,
+    UserCredentialResponse,
+    UserStatusRequest,
 )
 from .services.agent import SupportAgent
 from .services.auth import (
@@ -158,6 +164,7 @@ async def login(
     ))
     db.add(AuditLog(actor=account.id, action="login", resource="session"))
     await db.commit()
+    response.headers["Cache-Control"] = "no-store"
     response.set_cookie(
         COOKIE_NAME, token, max_age=SESSION_SECONDS,
         httponly=True, secure=settings.app_env != "development" or request.url.scheme == "https",
@@ -171,10 +178,11 @@ async def login(
 
 @app.get("/auth/me", response_model=AuthResponse)
 async def auth_me(
-    request: Request, user: AuthenticatedUser, settings: SettingsDep,
+    request: Request, response: Response, user: AuthenticatedUser, settings: SettingsDep,
 ) -> AuthResponse:
     if user is None:
         raise HTTPException(401, "请先登录")
+    response.headers["Cache-Control"] = "no-store"
     return AuthResponse(
         user_id=user.id, username=user.username, role=user.role,
         csrf_token=csrf_token(request.cookies[COOKIE_NAME], settings.confirmation_secret),
@@ -214,6 +222,99 @@ async def change_password(
     db.add(AuditLog(actor=user.id, action="password_changed", resource=user.id))
     await db.commit()
     response.delete_cookie(COOKIE_NAME, path="/")
+
+
+def _user_name(raw: str) -> str:
+    name = raw.strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,31}", name):
+        raise HTTPException(400, "登录名须为 3–32 位字母、数字、点、下划线或短横线")
+    return name
+
+
+async def _revoke_logins(db: AsyncSession, user_id: str) -> None:
+    sessions = (await db.scalars(
+        select(LoginSession).where(LoginSession.user_id == user_id)
+    )).all()
+    for session in sessions:
+        await db.delete(session)
+
+
+async def _managed_user(db: AsyncSession, user_id: str) -> UserAccount:
+    user = await db.get(UserAccount, user_id)
+    if not user or user.role != "user":
+        raise HTTPException(404, "用户不存在")
+    return user
+
+
+@app.get("/admin/users", response_model=ManagedUserList)
+async def list_users(db: DbDep, admin: AdminUser) -> ManagedUserList:
+    if admin is None:
+        raise HTTPException(403, "需要管理员权限")
+    users = (await db.scalars(
+        select(UserAccount).where(UserAccount.role == "user")
+        .order_by(UserAccount.created_at.desc(), UserAccount.username)
+    )).all()
+    return ManagedUserList(items=users)
+
+
+@app.post("/admin/users", response_model=UserCredentialResponse, status_code=201)
+async def create_user(
+    body: UserCreateRequest, response: Response, db: DbDep, admin: AdminUser,
+) -> UserCredentialResponse:
+    if admin is None:
+        raise HTTPException(403, "需要管理员权限")
+    username = _user_name(body.username)
+    if await db.scalar(select(UserAccount.id).where(UserAccount.username == username)):
+        raise HTTPException(409, "登录名已存在")
+    password = secrets.token_urlsafe(12)
+    user = UserAccount(username=username, password_hash=hash_password(password), role="user")
+    db.add(user)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(409, "登录名已存在") from exc
+    db.add(AuditLog(actor=admin.id, action="user_created", resource=user.id))
+    await db.commit()
+    await db.refresh(user)
+    response.headers["Cache-Control"] = "no-store"
+    return UserCredentialResponse(user=user, initial_password=password)
+
+
+@app.patch("/admin/users/{user_id}/status", response_model=ManagedUser)
+async def set_user_status(
+    user_id: str, body: UserStatusRequest, db: DbDep, admin: AdminUser,
+) -> ManagedUser:
+    if admin is None:
+        raise HTTPException(403, "需要管理员权限")
+    user = await _managed_user(db, user_id)
+    user.active = body.active
+    if not body.active:
+        await _revoke_logins(db, user.id)
+    db.add(AuditLog(
+        actor=admin.id, action="user_enabled" if body.active else "user_disabled",
+        resource=user.id,
+    ))
+    await db.commit()
+    await db.refresh(user)
+    return ManagedUser.model_validate(user)
+
+
+@app.post("/admin/users/{user_id}/reset-password", response_model=UserCredentialResponse)
+async def reset_user_password(
+    user_id: str, response: Response, db: DbDep, admin: AdminUser,
+) -> UserCredentialResponse:
+    if admin is None:
+        raise HTTPException(403, "需要管理员权限")
+    user = await _managed_user(db, user_id)
+    password = secrets.token_urlsafe(12)
+    user.password_hash = hash_password(password)
+    await _revoke_logins(db, user.id)
+    db.add(AuditLog(actor=admin.id, action="user_password_reset", resource=user.id))
+    await db.commit()
+    await db.refresh(user)
+    response.headers["Cache-Control"] = "no-store"
+    return UserCredentialResponse(user=user, initial_password=password)
 
 
 @app.get("/health")

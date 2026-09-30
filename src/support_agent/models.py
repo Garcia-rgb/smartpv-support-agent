@@ -35,7 +35,7 @@ class UserAccount(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(256))
-    role: Mapped[str] = mapped_column(String(16), default="admin")
+    role: Mapped[str] = mapped_column(String(16), default="user")
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

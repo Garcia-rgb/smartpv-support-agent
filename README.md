@@ -1,12 +1,12 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.6.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.7.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776ab)](pyproject.toml)
 [![coverage](https://img.shields.io/badge/coverage-88.84%25-brightgreen)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
 
-当前版本 **1.6.1**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.7.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 这是一个面向光伏电站技术支持场景的问答与办事服务：工程师把现场现象或问题丢进来，它去知识库里找依据、
 必要时查设备档案或算一段，涉及写操作（建工单）时先要人工确认。项目覆盖 FastAPI、数据库、RAG、LangGraph、
@@ -20,7 +20,7 @@
 
 ## 管理员登录
 
-首次启动前运行 `python scripts/create_admin.py --generate`，记下只显示一次的初始密码，再打开网页以 `admin` 登录。登录后可在页面右上角修改密码。服务端默认启用身份验证，浏览器自报的 `user_id` 不再决定实际身份；目前先建立管理员账号，普通用户账号留待下一阶段。已有 `demo-user` 会话保留，管理员可在历史会话中查看。
+首次启动前运行 `python scripts/create_admin.py --generate`，记下只显示一次的初始密码，再打开网页以 `admin` 登录。admin 可通过右上角「管理用户」创建 user 账号、停用账号和重置密码；初始密码只显示一次，需交给对应人员。user 登录后可问答、刷题、反馈、建自己的工单并看自己的会话，不能导入资料、运行评测或管理账号。两类账号都能在右上角修改自己的密码。服务端默认启用身份验证，浏览器自报的 `user_id` 不再决定实际身份。已有 `demo-user` 会话保留，管理员可在历史会话中查看。
 
 ## 图片答题
 
@@ -349,6 +349,7 @@ sequenceDiagram
 | `POST /chat` | 会话和 Agent 工作流 | 模型选工具、服务端校验执行；注入前置拦截；检索、计算器、设备查询、工单意图；写操作只返回确认令牌；依据跨版本时并列返回 `conflicts`；问题落在语料范围外时返回 `needs_clarification` 与建议补充的信息 |
 | `GET /sessions/{id}` | 查看会话 | 使用服务器验证的登录身份校验所有权；管理员可查看历史会话 |
 | `POST /feedback` | 回答反馈 | 保存评分和备注 |
+| `GET/POST /admin/users` | 管理 user 账号 | 仅 admin 可查看和创建；停用与重置密码会撤销旧会话 |
 | `POST /tickets` | 创建模拟工单 | 必须提供十分钟内有效且未使用的确认令牌 |
 | `POST /evaluations/run` | 运行离线评测 | 需用 `dataset_path` 指定评测集；检索、工具选择、最终回答三层各自统计通过率，并回报本次使用的模型 |
 

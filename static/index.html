@@ -215,6 +215,17 @@
   .login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--line);
     border-radius: 9px; font: inherit; }
   .login-card .primary { width: 100%; margin: 20px 0 0; }
+  .user-card { width: min(100%, 640px); max-height: 90vh; overflow: auto; }
+  .user-create { display: flex; gap: 8px; align-items: end; }
+  .user-create label { flex: 1; margin: 0; }
+  .user-create button { white-space: nowrap; margin: 0; width: auto; }
+  .user-row { display: flex; gap: 8px; align-items: center; padding: 10px 0;
+    border-top: 1px solid var(--line); font-size: 13px; }
+  .user-row .name { flex: 1; font-weight: 600; }
+  .user-row .hint { font-size: 12px; }
+  .user-row button { font-size: 12px; padding: 5px 8px; }
+  .credential { background: #fff9eb; border: 1px solid #f0d9ad; border-radius: 9px;
+    padding: 10px 12px; margin: 12px 0; overflow-wrap: anywhere; }
 
   @media (max-width: 860px) { .sidebar { display: none; } }
 </style>
@@ -223,7 +234,7 @@
 <div class="login-screen" id="loginScreen">
   <form class="login-card" id="loginForm">
     <h1>登录技术支持助手</h1>
-    <p>请使用管理员账号登录。</p>
+    <p>请使用管理员分配的账号登录。</p>
     <label for="loginName">账号</label>
     <input id="loginName" name="username" value="admin" autocomplete="username" required>
     <label for="loginPassword">密码</label>
@@ -245,6 +256,22 @@
     <button class="ghost" id="passwordCancel" type="button" style="width:100%;margin-top:8px">取消</button>
   </form>
 </div>
+<div class="login-screen" id="usersScreen" hidden>
+  <div class="login-card user-card">
+    <h1>管理 user 账号</h1>
+    <p>创建后会显示一次初始密码，请交给对应人员，并请对方登录后修改。</p>
+    <form class="user-create" id="userCreateForm">
+      <label for="newUsername">登录名或工号
+        <input id="newUsername" minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" required>
+      </label>
+      <button class="primary" type="submit">创建 user</button>
+    </form>
+    <div class="err" id="userError" role="alert"></div>
+    <div class="credential" id="userCredential" hidden></div>
+    <div id="usersList"></div>
+    <button class="ghost" id="usersClose" type="button" style="width:100%;margin-top:16px">关闭</button>
+  </div>
+</div>
 <div class="app" id="appRoot" hidden>
   <aside class="sidebar">
     <div class="brand">
@@ -255,7 +282,7 @@
       <button class="ghost" id="newBtn" style="width:100%">+ 新建会话</button>
       <div class="side-label" style="margin-top:16px">历史会话</div>
       <div id="sessionList"></div>
-      <div class="side-label" style="margin-top:18px">知识库</div>
+      <div class="side-label" id="knowledgeLabel" style="margin-top:18px">知识库</div>
       <button class="ghost" id="uploadBtn" style="width:100%">导入文档（PDF/TXT/MD）</button>
       <input type="file" id="fileInput" hidden accept=".pdf,.txt,.md,.markdown,.text">
       <div id="uploadMsg" class="side-foot" style="border:0;padding:8px 2px"></div>
@@ -271,6 +298,7 @@
       <span class="badge" id="modeBadge">…</span>
       <span class="spacer"></span>
       <span class="badge" id="userBadge">未登录</span>
+      <button class="ghost" id="usersBtn" type="button" hidden>管理用户</button>
       <button class="ghost" id="passwordBtn" type="button">修改密码</button>
       <button class="ghost" id="logoutBtn" type="button">退出</button>
     </div>
@@ -352,6 +380,7 @@ function showLogin() {
   state.sessionId = null;
   $('appRoot').hidden = true;
   $('passwordScreen').hidden = true;
+  $('usersScreen').hidden = true;
   $('loginScreen').hidden = false;
   $('loginPassword').value = '';
 }
@@ -361,8 +390,11 @@ function showApp(user) {
   state.csrfToken = user.csrf_token;
   $('userBadge').textContent = user.username + ' · ' + user.role;
   $('uploadBtn').hidden = user.role !== 'admin';
+  $('knowledgeLabel').hidden = user.role !== 'admin';
+  $('usersBtn').hidden = user.role !== 'admin';
   $('loginScreen').hidden = true;
   $('passwordScreen').hidden = true;
+  $('usersScreen').hidden = true;
   $('appRoot').hidden = false;
   loadSessions();
   input.focus();
@@ -410,6 +442,77 @@ $('passwordForm').onsubmit = async function (event) {
     showLogin();
     $('loginError').textContent = '密码已修改，请重新登录';
   } catch (error) { $('passwordError').textContent = error.message; }
+};
+
+function revealCredential(data) {
+  const box = $('userCredential');
+  box.hidden = false;
+  box.innerHTML = '账号：<strong>' + esc(data.user.username) + '</strong><br>' +
+    '初始密码（仅显示这一次）：<strong>' + esc(data.initial_password) + '</strong>';
+}
+
+async function loadUsers() {
+  const result = await api('/admin/users');
+  const box = $('usersList');
+  box.innerHTML = '';
+  if (!result.items.length) {
+    box.innerHTML = '<p class="hint">暂时没有 user 账号</p>';
+    return;
+  }
+  result.items.forEach(function (user) {
+    const row = document.createElement('div');
+    row.className = 'user-row';
+    row.innerHTML = '<span class="name">' + esc(user.username) + '</span>' +
+      '<span class="hint">' + (user.active ? '使用中' : '已停用') + '</span>';
+    const reset = document.createElement('button');
+    reset.className = 'ghost'; reset.textContent = '重置密码';
+    reset.onclick = async function () {
+      if (!confirm('重置后，此账号会退出所有已登录设备。确定重置？')) return;
+      try {
+        revealCredential(await api('/admin/users/' + encodeURIComponent(user.id) + '/reset-password',
+          { method: 'POST' }));
+        $('userError').textContent = '';
+      } catch (error) { $('userError').textContent = error.message; }
+    };
+    const toggle = document.createElement('button');
+    toggle.className = 'ghost'; toggle.textContent = user.active ? '停用' : '启用';
+    toggle.onclick = async function () {
+      if (user.active && !confirm('停用后，此账号会立即退出。确定停用？')) return;
+      try {
+        await api('/admin/users/' + encodeURIComponent(user.id) + '/status', {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ active: !user.active }),
+        });
+        $('userCredential').hidden = true;
+        $('userError').textContent = '';
+        await loadUsers();
+      } catch (error) { $('userError').textContent = error.message; }
+    };
+    row.append(reset, toggle);
+    box.appendChild(row);
+  });
+}
+
+$('usersBtn').onclick = async function () {
+  $('usersScreen').hidden = false;
+  $('userCredential').hidden = true;
+  $('userError').textContent = '';
+  try { await loadUsers(); }
+  catch (error) { $('userError').textContent = error.message; }
+};
+$('usersClose').onclick = function () { $('usersScreen').hidden = true; };
+$('userCreateForm').onsubmit = async function (event) {
+  event.preventDefault();
+  $('userError').textContent = '';
+  try {
+    const result = await api('/admin/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('newUsername').value.trim() }),
+    });
+    revealCredential(result);
+    $('newUsername').value = '';
+    await loadUsers();
+  } catch (error) { $('userError').textContent = error.message; }
 };
 
 /* ---------- 消息渲染 ---------- */
