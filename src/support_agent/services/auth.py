@@ -20,8 +20,8 @@ PASSWORD_ITERATIONS = 600_000
 
 
 def hash_password(password: str) -> str:
-    if len(password) < 12:
-        raise ValueError("管理员密码至少需要 12 个字符")
+    if len(password) < 8:
+        raise ValueError("管理员密码至少需要 8 个字符")
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PASSWORD_ITERATIONS)
     salt_text = base64.urlsafe_b64encode(salt).decode()

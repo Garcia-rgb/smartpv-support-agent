@@ -39,7 +39,7 @@ def main() -> None:
     if args.generate:
         password = secrets.token_urlsafe(18)
     else:
-        password = getpass.getpass("管理员密码（至少 12 个字符）：")
+        password = getpass.getpass("管理员密码（至少 8 个字符）：")
         if password != getpass.getpass("再次输入密码："):
             raise SystemExit("两次输入不一致")
     if asyncio.run(create_admin(password)):

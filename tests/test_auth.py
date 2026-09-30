@@ -100,11 +100,19 @@ async def test_password_change_revokes_existing_login(
         "/auth/login", json={"username": "admin", "password": "correct-password-123"}
     )
     csrf = login.json()["csrf_token"]
+    too_short = await client.post(
+        "/auth/password", headers={"X-CSRF-Token": csrf},
+        json={
+            "current_password": "correct-password-123",
+            "new_password": "short7!",
+        },
+    )
+    assert too_short.status_code == 422
     changed = await client.post(
         "/auth/password", headers={"X-CSRF-Token": csrf},
         json={
             "current_password": "correct-password-123",
-            "new_password": "another-strong-password-456",
+            "new_password": "eight123",
         },
     )
     assert changed.status_code == 204
@@ -113,5 +121,5 @@ async def test_password_change_revokes_existing_login(
         "/auth/login", json={"username": "admin", "password": "correct-password-123"}
     )).status_code == 401
     assert (await client.post(
-        "/auth/login", json={"username": "admin", "password": "another-strong-password-456"}
+        "/auth/login", json={"username": "admin", "password": "eight123"}
     )).status_code == 200
