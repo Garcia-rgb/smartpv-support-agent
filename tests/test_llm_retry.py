@@ -100,6 +100,37 @@ async def test_invalid_response_is_not_retried() -> None:
     sleep.assert_not_awaited()
 
 
+async def test_local_model_never_uses_system_proxy() -> None:
+    settings = Settings(
+        local_llm_base_url="http://127.0.0.1:11434/v1",
+        local_llm_model="local-test",
+    )
+    with patch("support_agent.services.llm.httpx.AsyncClient") as client_class:
+        post = client_class.return_value.__aenter__.return_value.post
+        post.return_value = successful_response("本地回答")
+        answer = await OpenAICompatibleClient(settings, local=True).answer("问题", ["资料"])
+
+    assert answer == "本地回答"
+    assert any(call.kwargs.get("trust_env") is False for call in client_class.call_args_list)
+
+
+async def test_local_qwen_returns_without_long_thinking_or_retries() -> None:
+    settings = Settings(
+        local_llm_base_url="http://127.0.0.1:11434/v1",
+        local_llm_model="qwen3-local:1.7b",
+    )
+    with patch("support_agent.services.llm.httpx.AsyncClient") as client_class:
+        post = client_class.return_value.__aenter__.return_value.post
+        post.return_value = successful_response("本地回答")
+        answer = await OpenAICompatibleClient(settings, local=True).answer("问题", [])
+
+    assert answer == "本地回答"
+    payload = post.await_args.kwargs["json"]
+    assert payload["think"] is False
+    assert payload["max_tokens"] == 384
+    assert client_class.call_args.kwargs["timeout"] == 60
+
+
 def tool_call_message(**extra: object) -> dict:
     """构造一条「模型要求调工具」的响应，extra 用于附加厂商扩展字段。"""
     arguments = '{"expression": "1+1"}'

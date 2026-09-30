@@ -1,22 +1,22 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.5.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.5.2-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776ab)](pyproject.toml)
 [![coverage](https://img.shields.io/badge/coverage-88.84%25-brightgreen)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
 
-当前版本 **1.5.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.5.2**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 这是一个面向光伏电站技术支持场景的问答与办事服务：工程师把现场现象或问题丢进来，它去知识库里找依据、
 必要时查设备档案或算一段，涉及写操作（建工单）时先要人工确认。项目覆盖 FastAPI、数据库、RAG、LangGraph、
 工具调用、人工确认、安全审计、离线评测、测试和 Docker。
 
-默认模式不需要模型 API、PostgreSQL 或 Redis：SQLite 保存数据，本地规则模型展示检索结果。启用隐私分流后，普通资料可经审核交给远程模型，内部问题只在本地处理。图片答题需安装 `quiz` 可选依赖。
+默认模式不需要模型 API、PostgreSQL 或 Redis：SQLite 保存数据，本地规则模型展示检索结果。当前启用分库后，普通与内部问题都可由 DeepSeek 整理命中资料。图片答题需安装 `quiz` 可选依赖。
 
 ## 资料隐私分流
 
-设置 `PRIVACY_ROUTING_ENABLED=true` 后，新导入资料默认属于隐私库。只有经审核标记为 `public` 的片段可作为 DeepSeek 问答依据；公开问答不会附带聊天历史。包含客户、站点、账号、工单等线索，或没有命中足够相关的普通资料时，问题留在本地。隐私问题本地没有依据时，系统只可用白名单产品名和技术词构造公开搜索词，网页结果仍交给本地模型整理。具体配置、当前限制和资料复核方法见 [隐私分流说明](docs/privacy_routing.md)。
+设置 `PRIVACY_ROUTING_ENABLED=true` 后，新导入资料默认属于隐私库。普通问题只检索普通库，内部问题可检索两类资料。按当前用户授权，两类问题都会把本次问题及命中片段交给 DeepSeek 整理，不附带聊天历史；内部资料会离开本机。资料不足时，仅用白名单技术词尝试公开搜索。具体范围见 [资料分流说明](docs/privacy_routing.md)。
 
 ## 图片答题
 
@@ -187,6 +187,7 @@ python scripts/create_desktop_launcher.py
 ```
 
 命令行等价写法是 `python scripts/start_client.py`。启动时打印知识库规模、模型模式和实际访问地址；
+配置了本机模型时会尝试启动已安装的 Ollama，关闭客户端时结束由它启动的服务。
 8000 端口被占用时（例如 Docker Desktop 会占用它）自动顺延到 8010、8020…，远程模型直连不通时自动尝试本机代理。
 
 页面本体是 `static/index.html`，一个不依赖构建工具的页面：左侧会话列表，回答下方是可展开的引用来源，
@@ -195,7 +196,7 @@ python scripts/create_desktop_launcher.py
 ## 模型配置
 
 配置文件是仓库根目录的 **`.env`**（已在 `.gitignore` 中，不要提交真实密钥）。
-远程模型默认关闭。普通资料完成审核后，须同时设置 `PRIVACY_ROUTING_ENABLED=true`、`ALLOW_REMOTE_LLM=true` 与下面三项配置；远程模型仅处理普通问题。未启用远程模型时，`/chat` 使用本地模型或检索摘要：
+远程模型默认关闭。按当前授权使用两类资料时，须同时设置 `PRIVACY_ROUTING_ENABLED=true`、`ALLOW_REMOTE_LLM=true` 与下面三项配置；未启用远程模型时，`/chat` 使用本地检索摘要：
 
 ```dotenv
 LLM_BASE_URL=https://api.deepseek.com
@@ -223,7 +224,7 @@ python scripts/check_llm.py
 `reasoning_content` 原样回传，否则续轮会被拒。适配层已经处理这件事；换成其他思考模式模型时，
 如果遇到第二轮 400，先怀疑这里。
 
-未配置远程模型时，`/chat` 会使用本地模型或检索摘要，适合离线演示和自动化测试。隐私分流启用后，内部问题始终走本地路径。测试套件本身不读 `.env`（见 `tests/conftest.py` 的 `hermetic_settings`），所以本机填了真实密钥也不会改变 `pytest` 的结果。
+未配置远程模型时，`/chat` 会使用本地检索摘要，适合离线演示和自动化测试。测试套件本身不读 `.env`（见 `tests/conftest.py` 的 `hermetic_settings`），所以本机填了真实密钥也不会改变 `pytest` 的结果。
 
 ## 向量后端
 

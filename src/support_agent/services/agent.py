@@ -170,14 +170,14 @@ class SupportAgent:
                 conflicts=self.rag.detect_conflicts(hits), privacy_scope="public",
             )
 
-        # 内部问题可以在本机同时利用两类资料，但不允许调用 self.llm。
+        # 内部问题可检索两类资料；按当前用户授权仅发送本次问题和命中片段。
         hits = await self.retrieve(text)
         if hits and hits[0].score >= 0.35:
             answer = summarize_local_retrieval(text, hits)
-            if self.local_llm.enabled:
+            if self.llm.enabled:
                 try:
-                    answer = await self.local_llm.answer(
-                        text, [hit.chunk.content for hit in hits]
+                    answer = await self.llm.answer(
+                        text, [hit.chunk.content[:1200] for hit in hits[:2]]
                     )
                 except LLMError:
                     pass
@@ -197,13 +197,13 @@ class SupportAgent:
             except Exception:
                 # 搜索服务故障只能降级，不能改用远程模型传原问题。
                 results = []
-        if results and self.settings.local_llm_enabled:
+        if results and self.llm.enabled:
             public_contexts = [
                 f"公开网页：{item['title']}\n{item['description']}\n{item['url']}"
                 for item in results
             ]
             try:
-                answer = await self.local_llm.answer(text, public_contexts)
+                answer = await self.llm.answer(text, public_contexts)
                 answer += "\n\n公开检索来源：\n" + "\n".join(
                     f"- {item['title']}：{item['url']}" for item in results[:3]
                 )
@@ -215,7 +215,7 @@ class SupportAgent:
                 pass
         return TurnOutcome(
             status="failed",
-            answer="内部资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。",
+            answer="资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。",
             answer_source="policy", privacy_scope="private",
         )
 
@@ -457,9 +457,7 @@ class SupportAgent:
         public = decision is not None and decision.scope == "public"
         result = await answer_question(
             self.db, text,
-            llm_client=self.llm if public else (
-                self.local_llm if self.settings.privacy_routing_enabled else self.llm
-            ),
+            llm_client=self.llm,
             visibility="public" if public else None,
         )
         if result.selected_options:

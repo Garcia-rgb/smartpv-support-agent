@@ -73,10 +73,41 @@ def _alarm_conclusion(lines: list[str], terms: set[str]) -> str | None:
     return None
 
 
+def summarize_explicit_case(question: str, hits: Sequence[SearchHit]) -> str | None:
+    """同一故障描述紧邻“解决方法”时，直接使用案例原文。"""
+    core = _GENERIC.sub("", question).strip(" ？?！!，,。")
+    if len(core) < 6:
+        return None
+    for hit in hits[:2]:
+        lines = [_plain(raw) for raw in hit.chunk.content.replace("\\n", "\n").splitlines()]
+        for index, line in enumerate(lines):
+            if core not in line or _CREDENTIALS.search(line):
+                continue
+            following = lines[index + 1 : index + 4]
+            if not following or not re.match(r"(?:解决|处理)方法[：:]", following[0]):
+                continue
+            steps = [re.split(r"[：:]", following[0], maxsplit=1)[-1].strip()]
+            for extra in following[1:]:
+                if re.match(r"\d+[）.)、]", extra) or _CREDENTIALS.search(extra):
+                    break
+                if extra and len(extra) >= 8:
+                    steps.append(extra)
+                if len(steps) == 3:
+                    break
+            return "\n".join(
+                ["**结论**", "资料记录了同类故障的处理案例。", "", "**处理方法**"]
+                + [f"{number}. {_short(step, 140)}" for number, step in enumerate(steps, 1)]
+            )
+    return None
+
+
 def summarize_local_retrieval(question: str, hits: Sequence[SearchHit]) -> str:
     """只摘录命中的事实；不靠规则补写设备参数或操作结论。"""
     if not hits:
         return "当前资料库没有找到足够依据。请补充设备型号、告警码或现场现象。"
+    explicit = summarize_explicit_case(question, hits)
+    if explicit:
+        return explicit
     terms = _query_terms(question)
     lines = _lines(hits)
     if not lines:

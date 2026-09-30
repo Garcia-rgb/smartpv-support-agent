@@ -10,8 +10,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -65,8 +67,10 @@ def corpus_summary() -> str:
 
 def report_model(settings) -> None:
     """报告模型模式；远程模型连不上时自动挂本机代理，省掉一次「怎么又报错了」。"""
+    if settings.privacy_routing_enabled:
+        print("  资料分库：已开启；两类问答均可交由远程模型整理")
     if not settings.llm_enabled:
-        print("  模型模式：本地规则模型（未配置密钥，工具选择由内置规则完成）")
+        print("  远程模型未启用，使用本地检索摘要")
         return
 
     parsed = urlparse(settings.llm_base_url)
@@ -81,6 +85,7 @@ def report_model(settings) -> None:
         if reachable(HOST, proxy_port, timeout=0.4):
             proxy = f"http://{HOST}:{proxy_port}"
             os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = proxy
+            os.environ["NO_PROXY"] = "127.0.0.1,localhost,::1"
             print(f"  模型模式：{settings.llm_model}（直连不通，已自动走本机代理 {proxy}）")
             return
 
@@ -88,6 +93,45 @@ def report_model(settings) -> None:
     print(f"  ！警告：{host}:{port} 直连不通，也没发现常见本地代理。")
     print("     若提问时报连接错误：设好 HTTPS_PROXY 再启动，")
     print("     或清空 .env 里的密钥，改用本地规则模型。")
+
+
+def start_local_model(settings) -> subprocess.Popen | None:
+    """本机配置了 Ollama 时，随客户端启动服务；已有服务则直接复用。"""
+    if not settings.privacy_routing_enabled or not settings.local_llm_enabled:
+        return None
+    parsed = urlparse(settings.local_llm_base_url)
+    if parsed.port != 11434 or reachable(HOST, 11434):
+        return None
+    configured = os.environ.get("OLLAMA_BIN")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(shutil.which("ollama")) if shutil.which("ollama") else None,
+        ROOT.parents[1] / "tools" / "ollama" / "ollama.exe",
+    ]
+    binary = next((path for path in candidates if path and path.is_file()), None)
+    if binary is None:
+        print("  本地模型：未找到 Ollama 程序，请先安装或设置 OLLAMA_BIN。")
+        return None
+    process_env = os.environ.copy()
+    process_env.setdefault("OLLAMA_MODELS", str(binary.parent / "models"))
+    process_env["OLLAMA_HOST"] = "127.0.0.1:11434"
+    process_env["OLLAMA_NO_CLOUD"] = "1"
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    log_path = binary.parent / "server.launcher.log"
+    with log_path.open("a", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [str(binary), "serve"], cwd=binary.parent, env=process_env,
+            stdout=log, stderr=subprocess.STDOUT, creationflags=flags,
+        )
+    for _ in range(40):
+        if reachable(HOST, 11434, timeout=0.1):
+            return process
+        if process.poll() is not None:
+            print(f"  本地模型启动失败，查看日志：{log_path}")
+            return None
+        time.sleep(0.2)
+    print(f"  本地模型尚未就绪，查看日志：{log_path}")
+    return process
 
 
 CONSOLE_TITLE = "光伏电站技术支持 Agent"
@@ -125,6 +169,7 @@ def main() -> int:
     from support_agent.main import app
 
     settings = get_settings()
+    local_process = start_local_model(settings)
     port = pick_port()
     url = f"http://{HOST}:{port}"
     set_console_title(CONSOLE_TITLE)
@@ -142,7 +187,11 @@ def main() -> int:
     if not os.environ.get("SUPPORT_AGENT_NO_BROWSER"):
         threading.Thread(target=open_browser_later, args=(url,), daemon=True).start()
 
-    uvicorn.run(app, host=HOST, port=port, log_level="info", access_log=False)
+    try:
+        uvicorn.run(app, host=HOST, port=port, log_level="info", access_log=False)
+    finally:
+        if local_process and local_process.poll() is None:
+            local_process.terminate()
     return 0
 
 

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from support_agent.services.local_summary import summarize_local_retrieval
+from support_agent.services.local_summary import summarize_explicit_case, summarize_local_retrieval
 
 
 def hit(content: str):
@@ -31,3 +31,18 @@ def test_alarm_answer_extracts_code_and_short_steps() -> None:
 
 def test_no_hits_does_not_invent_answer() -> None:
     assert "没有找到足够依据" in summarize_local_retrieval("未知设备", [])
+
+
+def test_explicit_fault_case_includes_its_solution() -> None:
+    hits = [hit(
+        "1）天华项目客户反映某逆变器无直流数值。\n"
+        "解决方法：系统设置-电站管理，查询电站后选中修改。\n"
+        "点击组串设置，发现故障设备未配置组串容量，联系客户配置。\n"
+        "2）其他问题。"
+    )]
+    answer = summarize_explicit_case("逆变器无直流数值", hits)
+
+    assert answer is not None
+    assert "系统设置-电站管理" in answer
+    assert "未配置组串容量" in answer
+    assert "其他问题" not in answer

@@ -326,7 +326,7 @@ const SOURCE = {
 
 function stateBlock(payload) {
   const tags = [];
-  if (payload.privacy_scope === 'private') tags.push({ text: '内部资料 · 本地处理', cls: '' });
+  if (payload.privacy_scope === 'private') tags.push({ text: '内部资料 · DeepSeek 整理', cls: '' });
   if (payload.privacy_scope === 'public') tags.push({ text: '公开资料通道', cls: '' });
   const known = STATUS[payload.status];
   if (known) tags.push({ text: known.label, cls: known.cls });
@@ -665,8 +665,9 @@ async function checkHealth() {
     $('health').textContent = '服务正常 · v' + (h.version || '?') + ' · ' + h.environment;
     const badge = $('modeBadge');
     if (h.privacy_routing_enabled) {
-      badge.textContent = '隐私分流已开启 · 本地模型' + (h.local_llm_enabled ? '可用' : '未接入');
-      badge.className = 'badge ' + (h.local_llm_enabled ? 'on' : 'off');
+      badge.textContent = '资料分库已开启 · DeepSeek ' + (h.llm_enabled ? '已配置' : '未配置');
+      badge.title = '本次问题和命中的资料片段会发送给 DeepSeek，不附带聊天历史';
+      badge.className = 'badge ' + (h.llm_enabled ? 'on' : 'off');
     } else if (h.llm_enabled) { badge.textContent = '大模型已接入'; badge.className = 'badge on'; }
     else { badge.textContent = '本地资料模式（远程模型已关闭）'; badge.className = 'badge off'; }
   } catch (e) {

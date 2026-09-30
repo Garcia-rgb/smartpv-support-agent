@@ -1,8 +1,10 @@
+import asyncio
 import hashlib
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import (
     Depends,
@@ -55,6 +57,7 @@ from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
 from .services.security import verify_confirmation_token
+from .services.semantic import EmbeddingUnavailableError
 
 
 def locate_static_dir() -> Path | None:
@@ -113,12 +116,25 @@ async def health(settings: SettingsDep) -> dict:
     # 排查「检索结果不对」时这是第一个要确认的事。
     # 缓存状态同理：显示降级时，命中率下降和限流变松都是预期内的，
     # 不用去代码里猜现在到底走的哪条路。
+    local_llm_reachable = False
+    if settings.local_llm_enabled:
+        parsed = urlsplit(settings.local_llm_base_url or "")
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(parsed.hostname, parsed.port or 80), timeout=0.5
+            )
+            writer.close()
+            await writer.wait_closed()
+            local_llm_reachable = True
+        except (OSError, TimeoutError):
+            pass
     return {
         "status": "ok",
         "version": __version__,
         "environment": settings.app_env,
         "llm_enabled": settings.llm_enabled,
         "local_llm_enabled": settings.local_llm_enabled,
+        "local_llm_reachable": local_llm_reachable,
         "privacy_routing_enabled": settings.privacy_routing_enabled,
         "embedding_backend": settings.embedding_backend,
         "embedding_dimension": settings.vector_dimension,
@@ -148,6 +164,8 @@ async def upload_document(
         ).ingest(filename, file.content_type or "application/octet-stream", data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
     return DocumentResponse(
         id=document.id, filename=document.filename, chunks=chunks, duplicate=duplicate
     )
@@ -186,13 +204,13 @@ async def analyze_quiz(
             raw_text,
             chunk_size=settings.chunk_size,
             overlap=settings.chunk_overlap,
-            llm_client=OpenAICompatibleClient(
-                settings, local=settings.privacy_routing_enabled and not public
-            ),
+            llm_client=OpenAICompatibleClient(settings),
             visibility="public" if public else None,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -220,6 +238,8 @@ async def chat(
         raise HTTPException(403, str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except EmbeddingUnavailableError as exc:
+        raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
 
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]

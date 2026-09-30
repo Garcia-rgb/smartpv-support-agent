@@ -1,4 +1,4 @@
-"""真实检索和模型边界的回归：内部内容不能进入远程调用。"""
+"""分库检索与远程调用的边界回归。"""
 
 from unittest.mock import AsyncMock
 
@@ -48,21 +48,24 @@ async def test_public_question_uses_only_public_chunks_and_no_private_history(db
     assert all("客户甲" not in chunk for chunk in sent_contexts)
 
 
-async def test_private_question_never_calls_remote_model(db_session):
+async def test_private_question_sends_current_question_and_matched_chunks(db_session):
     rag = RAGService(db_session)
     await rag.ingest(
         "private-record.md", "text/markdown",
         "客户甲电站内部记录：SUN2000 绝缘阻抗低告警，检查直流接线。".encode(),
     )
     agent = SupportAgent(db_session, routed_settings())
-    agent.llm.answer = AsyncMock(return_value="不应调用")
+    agent.llm.answer = AsyncMock(return_value="远程整理回答")
     agent.local_llm.answer = AsyncMock(return_value="本地资料回答")
 
     result = await agent.respond("客户甲电站的SUN2000绝缘阻抗低怎么查？", None, "u1")
 
     assert result.privacy_scope == "private"
-    assert result.answer == "本地资料回答"
-    agent.llm.answer.assert_not_awaited()
+    assert result.answer == "远程整理回答"
+    sent_question, sent_contexts = agent.llm.answer.await_args.args
+    assert sent_question == "客户甲电站的SUN2000绝缘阻抗低怎么查？"
+    assert any("客户甲电站内部记录" in chunk for chunk in sent_contexts)
+    agent.local_llm.answer.assert_not_awaited()
 
 
 async def test_public_and_private_retrieval_caches_stay_separate(db_session):
@@ -99,7 +102,7 @@ async def test_private_miss_searches_only_sanitized_public_terms(db_session, mon
     }])
     monkeypatch.setattr("support_agent.services.agent.search_public_web", search)
     agent = SupportAgent(db_session, routed_settings(public_search_api_key="test-only"))
-    agent.llm.answer = AsyncMock(return_value="不应调用")
+    agent.llm.answer = AsyncMock(return_value="请核对设备手册")
     agent.local_llm.answer = AsyncMock(return_value="请核对设备手册")
 
     result = await agent.respond(
@@ -110,4 +113,5 @@ async def test_private_miss_searches_only_sanitized_public_terms(db_session, mon
     assert result.privacy_scope == "private"
     assert "公开检索来源" in result.answer
     assert search.await_args.args[0] == "SUN2000-100KTL-M1 绝缘阻抗低 绝缘阻抗"
-    agent.llm.answer.assert_not_awaited()
+    assert agent.llm.answer.await_count == 1
+    agent.local_llm.answer.assert_not_awaited()
