@@ -86,8 +86,9 @@ class UserCredentialResponse(BaseModel):
 
 
 class PointTableGenerateRequest(BaseModel):
-    template_id: str = Field(min_length=1, max_length=64)
+    direction: Literal["south", "north"]
     fields: dict[str, str] = Field(default_factory=dict)
+    points: list[dict[str, str]] = Field(min_length=1, max_length=500)
 
 
 class ChatRequest(BaseModel):

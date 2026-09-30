@@ -194,6 +194,15 @@
     margin: 12px 0; }
   .pointtable-form .primary { margin: 12px 0 0; }
   .pointtable-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .pointtable-scroll { overflow-x: auto; max-height: 340px; overflow-y: auto; margin-top: 12px;
+    border: 1px solid var(--line); border-radius: 8px; }
+  .pointtable-scroll table { border-collapse: collapse; min-width: 920px; width: 100%; font-size: 12px; }
+  .pointtable-scroll th, .pointtable-scroll td { border-bottom: 1px solid var(--line);
+    padding: 5px; text-align: left; vertical-align: top; }
+  .pointtable-scroll th { position: sticky; top: 0; background: #f7fafc; z-index: 1; }
+  .pointtable-scroll input, .pointtable-scroll select { min-width: 90px; padding: 5px; margin: 0; }
+  .pointtable-scroll td:first-child input { min-width: 160px; }
+  .pointtable-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .quiz-answer { font-size: 20px; font-weight: 700; color: var(--brand); margin: 2px 0 8px; }
   .quiz-stem { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
   .quiz-edit { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 8px; }
@@ -350,7 +359,7 @@ const WORKFLOWS = {
   pointTable: {
     label: '点表制作',
     title: '点表制作',
-    description: '选择资料库中的模板，补齐现场信息后生成 CSV。',
+    description: '选择南向或北向，上传设备协议，再补齐缺失信息。',
     placeholder: '也可以在这里询问点表规则或设备协议',
   },
 };
@@ -950,83 +959,163 @@ const workflowPanel = $('workflowPanel');
 async function showPointTableForm() {
   workflowPanel.innerHTML =
     '<button class="close" type="button" aria-label="关闭点表制作">✕</button>' +
-    '<strong>点表制作</strong><div>选择资料库模板，补齐缺失项后生成 CSV。</div>' +
-    '<div class="pointtable-form"><label for="ptTemplate">模板<select id="ptTemplate"></select></label>' +
-    '<div class="pointtable-note" id="ptDescription"></div>' +
-    '<div class="pointtable-fields" id="ptFields"></div>' +
-    '<div class="pointtable-note" id="ptCaution"></div>' +
+    '<strong>点表制作</strong><div>先选南向或北向，再上传这次设备的协议。</div>' +
+    '<div class="pointtable-form"><div class="pointtable-fields">' +
+    '<label for="ptDirection">方向<select id="ptDirection"><option value="south">南向</option>' +
+    '<option value="north">北向</option></select></label>' +
+    '<label for="ptFile">设备协议（Word/PDF）<input id="ptFile" type="file" ' +
+    'accept=".doc,.docx,.pdf"></label></div>' +
+    '<div class="pointtable-actions"><button class="ghost" id="ptParse" type="button">解析协议</button>' +
+    '<span class="pointtable-note">仅在本机解析，不发送整份协议给 DeepSeek。</span></div>' +
     '<div class="err" id="ptError" role="alert"></div>' +
-    '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div>';
+    '<div id="ptParsed" hidden><div id="ptSummary" class="pointtable-note"></div>' +
+    '<div class="pointtable-fields" id="ptFields"></div>' +
+    '<div id="ptWarnings" class="pointtable-note"></div>' +
+    '<div class="pointtable-scroll"><table><thead id="ptHead"></thead><tbody id="ptRows"></tbody></table></div>' +
+    '<div class="pointtable-actions"><button class="ghost" id="ptAddRow" type="button">添加点位</button>' +
+    '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div></div></div>';
   workflowPanel.querySelector('.close').onclick = closeWorkflow;
-  try {
-    const result = await api('/point-tables/templates');
-    if (workflowPanel.hidden || !$('ptTemplate')) return;
-    if (!result.items.length) {
-      $('ptError').textContent = '资料库里还没有可用的点表模板';
-      $('ptGenerate').disabled = true;
-      return;
-    }
-    const select = $('ptTemplate');
-    result.items.forEach((template) => {
-      const option = document.createElement('option');
-      option.value = template.id;
-      option.textContent = template.name;
-      select.appendChild(option);
-    });
-    function renderFields() {
-      const template = result.items.find((item) => item.id === select.value);
-      $('ptDescription').textContent = template.description;
-      $('ptCaution').textContent = template.caution;
-      $('ptFields').innerHTML = '';
-      template.required_fields.forEach((field) => {
-        const label = document.createElement('label');
-        label.textContent = field;
-        const input = document.createElement('input');
-        input.name = field;
-        input.required = true;
-        input.maxLength = 64;
-        if (field === 'MODBUS设备地址') {
-          input.type = 'number'; input.min = '1'; input.max = '247';
-        }
-        label.appendChild(input);
-        $('ptFields').appendChild(label);
+  let parsed = null;
+  const fieldNames = {
+    name: '信号名称', address: '协议地址', north_address: '北向点号',
+    function: '功能类型', register_type: '寄存器类型', access: '读写',
+    data_type: '数据类型', count: '寄存器数', gain: '倍率', unit: '单位',
+  };
+  const options = {
+    function: ['', '遥信', '双点遥信', '遥测', '遥控', '双点遥控', '遥调', '遥脉'],
+    register_type: ['', '线圈', '输入离散量', '保持寄存器', '输入寄存器'],
+    access: ['', 'RO', 'WO'],
+    data_type: ['', 'BIT', 'UINT16', 'INT16', 'UINT32', 'INT32', 'FLOAT', 'DOUBLE'],
+  };
+  function pointColumns() {
+    return parsed.direction === 'south'
+      ? ['name', 'address', 'function', 'register_type', 'access', 'data_type', 'count', 'gain', 'unit']
+      : ['name', 'north_address', 'function', 'unit'];
+  }
+  function readPoints() {
+    return [...$('ptRows').querySelectorAll('tr')].map((row) => {
+      const original = parsed.points[Number(row.dataset.index)] || {};
+      const point = { ...original };
+      row.querySelectorAll('[data-key]').forEach((control) => {
+        point[control.dataset.key] = control.value.trim();
       });
-      $('ptError').textContent = '';
-    }
-    select.onchange = renderFields;
-    renderFields();
-    $('ptGenerate').onclick = async function () {
-      const template = result.items.find((item) => item.id === select.value);
-      const fields = {};
-      for (const field of template.required_fields) {
-        const value = [...$('ptFields').querySelectorAll('input')]
-          .find((item) => item.name === field).value.trim();
-        if (!value) { $('ptError').textContent = '请填写' + field; return; }
-        fields[field] = value;
-      }
-      $('ptError').textContent = '';
-      $('ptGenerate').disabled = true;
-      try {
-        const res = await fetch('/point-tables/generate', {
-          method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
-          body: JSON.stringify({ template_id: template.id, fields }),
-        });
-        if (!res.ok) {
-          const error = await res.json();
-          if (res.status === 401) showLogin();
-          throw new Error(error.detail || '生成失败');
+      return point;
+    });
+  }
+  function renderPoints() {
+    const columns = pointColumns();
+    $('ptHead').innerHTML = '<tr>' + columns.map((key) => '<th>' + fieldNames[key] + '</th>').join('') +
+      '<th>操作</th></tr>';
+    $('ptRows').innerHTML = '';
+    parsed.points.forEach((point, index) => {
+      const row = document.createElement('tr');
+      row.dataset.index = index;
+      columns.forEach((key) => {
+        const cell = document.createElement('td');
+        let control;
+        if (options[key]) {
+          control = document.createElement('select');
+          options[key].forEach((value) => {
+            const option = document.createElement('option');
+            option.value = value; option.textContent = value || '请选择';
+            control.appendChild(option);
+          });
+        } else {
+          control = document.createElement('input');
+          control.maxLength = 100;
         }
-        const url = URL.createObjectURL(await res.blob());
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = template.name.replace(' · ', '_') + '.csv';
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      } catch (error) { $('ptError').textContent = error.message; }
-      finally { $('ptGenerate').disabled = false; }
-    };
-  } catch (error) { if ($('ptError')) $('ptError').textContent = error.message; }
+        control.dataset.key = key;
+        control.value = point[key] || '';
+        cell.appendChild(control);
+        if (key === 'name' && point.source) {
+          const source = document.createElement('small');
+          source.className = 'pointtable-note';
+          source.textContent = '协议：' + point.source;
+          cell.appendChild(source);
+        }
+        row.appendChild(cell);
+      });
+      const action = document.createElement('td');
+      const remove = document.createElement('button');
+      remove.className = 'ghost'; remove.type = 'button'; remove.textContent = '移除';
+      remove.onclick = function () {
+        parsed.points = readPoints().filter((_, i) => i !== index);
+        renderPoints();
+      };
+      action.appendChild(remove);
+      row.appendChild(action);
+      $('ptRows').appendChild(row);
+    });
+  }
+  function renderParsed() {
+    $('ptParsed').hidden = false;
+    $('ptSummary').textContent = parsed.source_name + ' · 识别出 ' + parsed.points.length +
+      ' 个候选点位，请核对后生成。';
+    $('ptWarnings').textContent = parsed.warnings.join(' ');
+    $('ptFields').innerHTML = '';
+    parsed.common_fields.forEach((field) => {
+      const label = document.createElement('label');
+      label.textContent = field;
+      const input = document.createElement('input');
+      input.name = field;
+      input.value = parsed.suggested_fields[field] || '';
+      input.maxLength = 64;
+      label.appendChild(input);
+      $('ptFields').appendChild(label);
+    });
+    renderPoints();
+  }
+  function resetParsed() { parsed = null; $('ptParsed').hidden = true; $('ptError').textContent = ''; }
+  $('ptDirection').onchange = resetParsed;
+  $('ptFile').onchange = resetParsed;
+  $('ptParse').onclick = async function () {
+    const file = $('ptFile').files[0];
+    if (!file) { $('ptError').textContent = '请先选择设备协议文件'; return; }
+    const form = new FormData();
+    form.append('direction', $('ptDirection').value);
+    form.append('file', file);
+    $('ptError').textContent = '';
+    $('ptParse').disabled = true;
+    try {
+      parsed = await api('/point-tables/parse', { method: 'POST', body: form });
+      renderParsed();
+    } catch (error) { $('ptError').textContent = error.message; }
+    finally { $('ptParse').disabled = false; }
+  };
+  $('ptAddRow').onclick = function () {
+    parsed.points = readPoints();
+    parsed.points.push({ name: '', address: '', north_address: '', function: '',
+      register_type: '', access: '', data_type: '', count: '1', gain: '1', unit: '' });
+    renderPoints();
+  };
+  $('ptGenerate').onclick = async function () {
+    const fields = {};
+    $('ptFields').querySelectorAll('input').forEach((control) => {
+      fields[control.name] = control.value.trim();
+    });
+    const points = readPoints();
+    $('ptError').textContent = '';
+    $('ptGenerate').disabled = true;
+    try {
+      const res = await fetch('/point-tables/generate', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
+        body: JSON.stringify({ direction: parsed.direction, fields, points }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        if (res.status === 401) showLogin();
+        throw new Error(error.detail || '生成失败');
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = '点表_' + (parsed.direction === 'south' ? '南向' : '北向') + '.csv';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { $('ptError').textContent = error.message; }
+    finally { $('ptGenerate').disabled = false; }
+  };
 }
 function closeWorkflow() {
   workflowPanel.hidden = true;

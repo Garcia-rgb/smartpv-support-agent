@@ -78,7 +78,8 @@ from .services.auth import (
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
 from .services.llm import OpenAICompatibleClient
-from .services.pointtable import PointTableError, generate_csv, list_templates
+from .services.pointtable import MAX_BYTES as MAX_PROTOCOL_BYTES
+from .services.pointtable import PointTableError, generate_csv, parse_protocol
 from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
@@ -319,11 +320,18 @@ async def reset_user_password(
     return UserCredentialResponse(user=user, initial_password=password)
 
 
-@app.get("/point-tables/templates")
-async def point_table_templates(user: AuthenticatedUser) -> dict:
+@app.post("/point-tables/parse")
+async def parse_point_table_protocol(
+    user: AuthenticatedUser, file: UploadDep, direction: Annotated[str, Form()],
+) -> dict:
     if user is None:
         raise HTTPException(403, "需要登录账号")
-    return {"items": list_templates()}
+    data = await file.read(MAX_PROTOCOL_BYTES + 1)
+    try:
+        result = await run_in_threadpool(parse_protocol, file.filename or "", data, direction)
+    except PointTableError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return result
 
 
 @app.post("/point-tables/generate")
@@ -331,7 +339,7 @@ async def make_point_table(body: PointTableGenerateRequest, user: AuthenticatedU
     if user is None:
         raise HTTPException(403, "需要登录账号")
     try:
-        content, filename = generate_csv(body.template_id, body.fields)
+        content, filename = generate_csv(body.direction, body.fields, body.points)
     except PointTableError as exc:
         raise HTTPException(422, str(exc)) from exc
     return Response(
