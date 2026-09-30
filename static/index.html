@@ -337,7 +337,7 @@
         <textarea id="input" rows="1" placeholder="描述现场问题或粘贴学习题目（Enter 发送，Shift+Enter 换行）"></textarea>
         <div class="composer-foot">
           <span class="hint" id="hint">已连接本地服务</span>
-          <button class="ghost" id="quizBtn" type="button">📷 图片答题</button>
+          <button class="ghost" id="quizBtn" type="button">📷 上传图片</button>
           <input type="file" id="quizInput" hidden accept="image/png,image/jpeg,image/webp">
           <button class="primary" id="sendBtn">发送</button>
         </div>
@@ -629,17 +629,23 @@ function addQuizResult(payload) {
   if (payload.citations && payload.citations.length) body.appendChild(citesBlock(payload.citations));
   const edit = document.createElement('details');
   edit.className = 'quiz-edit';
-  edit.innerHTML = '<summary>识别有误？修改题目文字后重答</summary>' +
-    '<textarea aria-label="识别出的题干和选项"></textarea><button class="ghost" type="button">重新分析</button>';
+  edit.innerHTML = '<summary>识别有误？修改文字后重新提问</summary>' +
+    '<textarea aria-label="识别出的文字"></textarea><button class="ghost" type="button">重新提问</button>';
   edit.querySelector('textarea').value = payload.recognized_text;
   edit.querySelector('button').onclick = async function () {
     const btn = edit.querySelector('button');
     btn.disabled = true;
     try {
       const fd = new FormData();
-      fd.append('recognized_text', edit.querySelector('textarea').value);
-      const updated = await api('/quiz/analyze', { method: 'POST', body: fd });
-      addQuizResult(updated);
+      fd.append('message', edit.querySelector('textarea').value);
+      if (state.sessionId) fd.append('session_id', state.sessionId);
+      const updated = await api('/input', { method: 'POST', body: fd });
+      if (updated.kind === 'quiz') addQuizResult(updated.quiz);
+      else {
+        state.sessionId = updated.chat.session_id;
+        addBot(updated.chat);
+        loadSessions();
+      }
     } catch (e) { alert('重新分析失败：' + e.message); }
     finally { btn.disabled = false; }
   };
@@ -786,10 +792,21 @@ function scroll() { const m = $('messages'); m.scrollTop = m.scrollHeight; }
 function showEmpty() {
   wrap.innerHTML =
     '<div class="empty"><h2>光伏电站技术支持 Agent</h2>' +
-    '<p>上传或粘贴题目截图，即可识别题干、选项并查看讲解。</p></div>';
+    '<p>描述现场问题、输入学习题目，或上传和粘贴截图。</p></div>';
 }
 
 /* ---------- 交互 ---------- */
+function addRecognitionEdit(target, recognized) {
+  if (!recognized) return;
+  const edit = document.createElement('details');
+  edit.className = 'quiz-edit';
+  edit.innerHTML = '<summary>查看或修改图片识别文字</summary>' +
+    '<textarea aria-label="图片识别文字"></textarea><button class="ghost" type="button">按修改后的文字重新提问</button>';
+  edit.querySelector('textarea').value = recognized;
+  edit.querySelector('button').onclick = function () { send(edit.querySelector('textarea').value); };
+  target.querySelector('.bubble').appendChild(edit);
+}
+
 async function send(text) {
   text = (text !== undefined ? text : input.value).trim();
   if (!text || state.busy) return;
@@ -801,17 +818,17 @@ async function send(text) {
   autoGrow();
   addTyping();
   try {
-    const body = { message: text };
-    if (state.sessionId) body.session_id = state.sessionId;
-    const res = await api('/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const body = new FormData();
+    body.append('message', text);
+    if (state.sessionId) body.append('session_id', state.sessionId);
+    const result = await api('/input', { method: 'POST', body });
     clearTyping();
-    state.sessionId = res.session_id;
-    addBot(res);
-    loadSessions();
+    if (result.kind === 'quiz') addQuizResult(result.quiz);
+    else {
+      state.sessionId = result.chat.session_id;
+      addBot(result.chat);
+      loadSessions();
+    }
   } catch (e) {
     clearTyping();
     const el = document.createElement('div');
@@ -825,7 +842,7 @@ async function send(text) {
   }
 }
 
-async function sendQuizImage(file) {
+async function sendImage(file) {
   if (!file || state.busy) return;
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
     alert('请使用 PNG、JPG 或 WebP 图片'); return;
@@ -833,11 +850,16 @@ async function sendQuizImage(file) {
   state.busy = true;
   $('sendBtn').disabled = true;
   $('quizBtn').disabled = true;
+  const caption = input.value.trim();
+  input.value = '';
+  autoGrow();
   if (wrap.querySelector('.empty')) wrap.innerHTML = '';
   const preview = document.createElement('div');
   preview.className = 'msg user';
   const url = URL.createObjectURL(file);
-  preview.innerHTML = '<div class="avatar">我</div><div class="bubble">题目截图<br><img class="quiz-thumb" alt="上传的题目截图"></div>';
+  preview.innerHTML = '<div class="avatar">我</div><div class="bubble">图片' +
+    (caption ? '<div>' + esc(caption) + '</div>' : '') +
+    '<img class="quiz-thumb" alt="上传的截图"></div>';
   preview.querySelector('img').src = url;
   preview.querySelector('img').onload = () => URL.revokeObjectURL(url);
   wrap.appendChild(preview);
@@ -845,12 +867,19 @@ async function sendQuizImage(file) {
   try {
     const fd = new FormData();
     fd.append('file', file);
-    const result = await api('/quiz/analyze', { method: 'POST', body: fd });
+    if (caption) fd.append('message', caption);
+    if (state.sessionId) fd.append('session_id', state.sessionId);
+    const result = await api('/input', { method: 'POST', body: fd });
     clearTyping();
-    addQuizResult(result);
+    if (result.kind === 'quiz') addQuizResult(result.quiz);
+    else {
+      state.sessionId = result.chat.session_id;
+      addRecognitionEdit(addBot(result.chat), result.recognized_text);
+      loadSessions();
+    }
   } catch (e) {
     clearTyping();
-    addBot({ status: 'failed', answer: '图片答题失败：' + e.message });
+    addBot({ status: 'failed', answer: '图片处理失败：' + e.message });
   } finally {
     state.busy = false;
     $('sendBtn').disabled = false;
@@ -920,12 +949,12 @@ async function checkHealth() {
 $('sendBtn').onclick = function () { send(); };
 $('quizBtn').onclick = function () { $('quizInput').click(); };
 $('quizInput').onchange = function (e) {
-  sendQuizImage(e.target.files[0]);
+  sendImage(e.target.files[0]);
   e.target.value = '';
 };
 input.addEventListener('paste', function (e) {
   const image = Array.from(e.clipboardData?.files || []).find((f) => f.type.startsWith('image/'));
-  if (image) { e.preventDefault(); sendQuizImage(image); }
+  if (image) { e.preventDefault(); sendImage(image); }
 });
 input.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }

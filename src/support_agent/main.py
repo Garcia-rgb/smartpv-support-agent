@@ -60,6 +60,7 @@ from .schemas import (
     SessionResponse,
     TicketCreateRequest,
     TicketResponse,
+    UnifiedInputResponse,
     UserCreateRequest,
     UserCredentialResponse,
     UserStatusRequest,
@@ -77,6 +78,7 @@ from .services.auth import (
 )
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
+from .services.input_routing import is_quiz
 from .services.llm import OpenAICompatibleClient
 from .services.pointtable import MAX_BYTES as MAX_PROTOCOL_BYTES
 from .services.pointtable import PointTableError, generate_csv, parse_protocol
@@ -488,6 +490,52 @@ async def chat(
         raise HTTPException(404, str(exc)) from exc
     except EmbeddingUnavailableError as exc:
         raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
+
+
+@app.post("/input", response_model=UnifiedInputResponse)
+async def unified_input(
+    db: DbDep,
+    settings: SettingsDep,
+    response: Response,
+    user: AuthenticatedUser,
+    file: OptionalQuizUpload = None,
+    message: Annotated[str | None, Form()] = None,
+    session_id: Annotated[str | None, Form()] = None,
+) -> UnifiedInputResponse:
+    """Normalize image/text input, then route clear exam questions to quiz logic."""
+    prompt = (message or "").strip()
+    recognized = None
+    if file:
+        if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise HTTPException(400, "请上传 PNG、JPG 或 WebP 图片")
+        data = await file.read(settings.max_upload_bytes + 1)
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(413, "图片超过大小限制")
+        try:
+            recognized = (await run_in_threadpool(recognize_image, data)).strip()
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not recognized:
+            raise HTTPException(400, "图片中未识别到文字，请换清晰截图或直接输入问题")
+    elif not prompt:
+        raise HTTPException(400, "请输入问题或上传图片")
+    raw = recognized or prompt
+    issue_hint = any(word in prompt for word in ("客户", "现场", "告警", "报错", "排查", "故障"))
+    if is_quiz(raw) and not issue_hint:
+        identity = user.id if user else "demo-user"
+        decision = await get_rate_limiter(settings).check(identity)
+        if not decision.allowed:
+            raise HTTPException(429, f"请求过于频繁，请 {decision.retry_after} 秒后重试",
+                                headers=decision.headers)
+        response.headers.update(decision.headers)
+        result = await analyze_quiz(db, settings, user, recognized_text=raw)
+        return UnifiedInputResponse(kind="quiz", recognized_text=recognized, quiz=result)
+    combined = f"{prompt}\n{recognized}" if prompt and recognized else raw
+    if len(combined) > 4000:
+        raise HTTPException(400, "识别文字过长，请裁剪图片或精简问题")
+    result = await chat(ChatRequest(message=combined, session_id=session_id),
+                        db, settings, response, user)
+    return UnifiedInputResponse(kind="chat", recognized_text=recognized, chat=result)
 
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]

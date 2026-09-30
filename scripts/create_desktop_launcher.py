@@ -29,7 +29,9 @@ TEMPLATE = r"""@echo off
 chcp 65001 >nul
 title PV Station Support Agent
 cd /d "{root}"
-"{python}" "{script}"
+set "PYTHONPATH={root}\src;{root}\.localdeps"
+echo Starting SmartPV Support Agent, please wait...
+"{python}" -u "{script}"
 echo.
 echo Press any key to close this window...
 pause >nul

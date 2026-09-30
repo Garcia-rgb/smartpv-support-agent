@@ -1,12 +1,12 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.8.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.9.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776ab)](pyproject.toml)
 [![coverage](https://img.shields.io/badge/coverage-88.84%25-brightgreen)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
 
-当前版本 **1.8.1**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.9.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 这是一个面向光伏电站技术支持场景的问答与办事服务：工程师把现场现象或问题丢进来，它去知识库里找依据、
 必要时查设备档案或算一段，涉及写操作（建工单）时先要人工确认。项目覆盖 FastAPI、数据库、RAG、LangGraph、
@@ -22,9 +22,9 @@
 
 首次启动前运行 `python scripts/create_admin.py --generate`，记下只显示一次的初始密码，再打开网页以 `admin` 登录。admin 可通过右上角「管理用户」创建 user 账号、停用账号和重置密码；初始密码只显示一次，需交给对应人员。user 登录后可问答、刷题、反馈、建自己的工单并看自己的会话，不能导入资料、运行评测或管理账号。两类账号都能在右上角修改自己的密码。服务端默认启用身份验证，浏览器自报的 `user_id` 不再决定实际身份。已有 `demo-user` 会话保留，管理员可在历史会话中查看。
 
-## 图片答题
+## 统一文字与图片输入
 
-在页面点击「📷 图片答题」上传 PNG/JPG/WebP 截图，也可以在输入框直接粘贴截图。系统在本机识别题干和选项，显示答案、简短讲解及资料依据；识别错字可展开修改后重答。资料不能明确支持某个选项时会提示核对，不会猜测。
+在输入框写文字，或点击「📷 上传图片」上传 PNG/JPG/WebP 截图，也可以直接粘贴截图。图片先在本机识别文字；有明确题目结构时走刷题讲解，客户消息、告警或现场问题截图走普通问答。识别文字可以展开核对和修改。扫描照片中没有可识别文字时会提示重新提供清晰截图或手动输入；当前版本不理解纯图像中的设备外观和故障现象。资料不能明确支持某个选项时会提示核对，不会猜测。
 
 ```powershell
 pip install -e ".[quiz]"

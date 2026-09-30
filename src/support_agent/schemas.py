@@ -169,6 +169,13 @@ class ChatResponse(BaseModel):
     conflicts: list[VersionConflict] = []
 
 
+class UnifiedInputResponse(BaseModel):
+    kind: Literal["quiz", "chat"]
+    recognized_text: str | None = None
+    quiz: QuizResponse | None = None
+    chat: ChatResponse | None = None
+
+
 class MessageView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
