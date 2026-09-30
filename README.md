@@ -1,12 +1,12 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.5.2-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.6.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776ab)](pyproject.toml)
 [![coverage](https://img.shields.io/badge/coverage-88.84%25-brightgreen)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
 
-当前版本 **1.5.2**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.6.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 这是一个面向光伏电站技术支持场景的问答与办事服务：工程师把现场现象或问题丢进来，它去知识库里找依据、
 必要时查设备档案或算一段，涉及写操作（建工单）时先要人工确认。项目覆盖 FastAPI、数据库、RAG、LangGraph、
@@ -17,6 +17,10 @@
 ## 资料隐私分流
 
 设置 `PRIVACY_ROUTING_ENABLED=true` 后，新导入资料默认属于隐私库。普通问题只检索普通库，内部问题可检索两类资料。按当前用户授权，两类问题都会把本次问题及命中片段交给 DeepSeek 整理，不附带聊天历史；内部资料会离开本机。资料不足时，仅用白名单技术词尝试公开搜索。具体范围见 [资料分流说明](docs/privacy_routing.md)。
+
+## 管理员登录
+
+首次启动前运行 `python scripts/create_admin.py --generate`，记下只显示一次的初始密码，再打开网页以 `admin` 登录。登录后可在页面右上角修改密码。服务端默认启用身份验证，浏览器自报的 `user_id` 不再决定实际身份；目前先建立管理员账号，普通用户账号留待下一阶段。已有 `demo-user` 会话保留，管理员可在历史会话中查看。
 
 ## 图片答题
 
@@ -310,7 +314,7 @@ sequenceDiagram
     participant T as 工具与检索
     participant D as 数据库
 
-    C->>A: POST /chat {message, session_id, user_id}
+    C->>A: POST /chat {message, session_id} + 登录会话
     Note over A: 限流在最前面 —— 被拒的请求不建会话、不写消息、不调模型
     A->>S: respond(text, session_id, user_id)
     S->>D: 读会话与历史（必须在写入本轮消息之前）
@@ -343,7 +347,7 @@ sequenceDiagram
 | `GET /health` | 运行状态 | 报出 `version`、`environment`、向量后端与维度、缓存后端与是否降级、限流额度；排查问题的第一站 |
 | `POST /documents` | 导入 TXT、Markdown、PDF | 限制大小、校验类型、按 SHA-256 去重 |
 | `POST /chat` | 会话和 Agent 工作流 | 模型选工具、服务端校验执行；注入前置拦截；检索、计算器、设备查询、工单意图；写操作只返回确认令牌；依据跨版本时并列返回 `conflicts`；问题落在语料范围外时返回 `needs_clarification` 与建议补充的信息 |
-| `GET /sessions/{id}` | 查看会话 | 通过 `X-User-Id` 做所有权校验 |
+| `GET /sessions/{id}` | 查看会话 | 使用服务器验证的登录身份校验所有权；管理员可查看历史会话 |
 | `POST /feedback` | 回答反馈 | 保存评分和备注 |
 | `POST /tickets` | 创建模拟工单 | 必须提供十分钟内有效且未使用的确认令牌 |
 | `POST /evaluations/run` | 运行离线评测 | 需用 `dataset_path` 指定评测集；检索、工具选择、最终回答三层各自统计通过率，并回报本次使用的模型 |
@@ -483,7 +487,7 @@ git tag v1.0.0                       # 4. 打标签，与 CHANGELOG 的版本号
 
 - `CHANGELOG.md`：版本历史，每条改动都附实测数字
 - `CONTRIBUTING.md`：环境搭建、代码约定、提交前检查，以及「改了 A 必须同步 B」的连带清单
-- `SECURITY.md`：已实现的安全边界、部署前必改项、已知边界（含「没有真实认证」这条）
+- `SECURITY.md`：已实现的安全边界、部署前必改项和已知限制
 - `docs/deployment.md`：部署到服务器、升级与回滚、上线检查清单
 - `LICENSE`：MIT
 - `src/support_agent/`：应用代码

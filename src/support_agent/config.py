@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "development"
+    auth_enabled: bool = True
     database_url: str = "sqlite+aiosqlite:///./support_agent.db"
     # 检索缓存与限流共用的存储。留空则用进程内实现：本地开发和 CI 走这条，
     # 功能完整，只是多进程下缓存命中率下降、限流额度按进程数放大。
@@ -31,7 +32,7 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     # 公司资料默认只在本机处理；配置了密钥也不会自动启用外部模型。
     allow_remote_llm: bool = False
-    # 双资料库分流需显式开启；开启后内部问题绝不调用远程模型。
+    # 双资料库分流需显式开启；远程模型能否处理内部资料由当前业务规则决定。
     privacy_routing_enabled: bool = False
     local_llm_base_url: str | None = None
     local_llm_model: str | None = None

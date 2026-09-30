@@ -42,6 +42,23 @@ class DocumentResponse(BaseModel):
     duplicate: bool = False
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class AuthResponse(BaseModel):
+    user_id: str
+    username: str
+    role: Literal["admin", "user"]
+    csrf_token: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None

@@ -471,6 +471,7 @@ async def limited_client(db_session: AsyncSession) -> AsyncIterator[httpx.AsyncC
         confirmation_secret="test-secret",
         rate_limit_requests=2,
         rate_limit_window_seconds=60,
+        auth_enabled=False,
     )
 
     async def override_db():

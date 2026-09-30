@@ -1,11 +1,18 @@
 @baseUrl = http://127.0.0.1:8000
-@userId = demo-user
+@csrfToken = replace-with-csrf-token-from-login
+
+### 登录后复制响应中的 csrf_token；后续请求沿用会话 Cookie
+POST {{baseUrl}}/auth/login
+Content-Type: application/json
+
+{"username":"admin","password":"replace-with-admin-password"}
 
 ### 健康检查
 GET {{baseUrl}}/health
 
 ### 导入文档（Swagger 更适合选择本地文件）
 POST {{baseUrl}}/documents
+X-CSRF-Token: {{csrfToken}}
 Content-Type: multipart/form-data; boundary=boundary
 
 --boundary
@@ -17,44 +24,44 @@ Content-Type: text/markdown
 
 ### 知识问答
 POST {{baseUrl}}/chat
+X-CSRF-Token: {{csrfToken}}
 Content-Type: application/json
 
 {
-  "message": "绝缘阻抗低对应哪个告警？",
-  "user_id": "{{userId}}"
+  "message": "绝缘阻抗低对应哪个告警？"
 }
 
 ### 设备查询
 POST {{baseUrl}}/chat
+X-CSRF-Token: {{csrfToken}}
 Content-Type: application/json
 
 {
-  "message": "设备 SN-2024-000123 现在什么状态",
-  "user_id": "{{userId}}"
+  "message": "设备 SN-2024-000123 现在什么状态"
 }
 
 ### 工单意图——先取得 confirmation_token
 POST {{baseUrl}}/chat
+X-CSRF-Token: {{csrfToken}}
 Content-Type: application/json
 
 {
-  "message": "设备 SN-2024-000789 一直故障停机，请创建工单",
-  "user_id": "{{userId}}"
+  "message": "设备 SN-2024-000789 一直故障停机，请创建工单"
 }
 
 ### 确认创建工单——替换令牌
 POST {{baseUrl}}/tickets
+X-CSRF-Token: {{csrfToken}}
 Content-Type: application/json
 
 {
-  "confirmation_token": "replace-with-token-from-chat",
-  "user_id": "{{userId}}"
+  "confirmation_token": "replace-with-token-from-chat"
 }
 
 # 上面这个接口要过四道闸，顺序是有意的：
 #   1. 签名      —— 改动令牌任意一个字符，返回 400「确认令牌签名无效」
 #   2. 有效期    —— 超过 exp（默认十分钟），返回 400「确认令牌已过期」
-#   3. 归属      —— action 或 user_id 与请求不符，返回 403
+#   3. 归属      —— action 或登录身份与令牌不符，返回 403
 #   4. 单次使用  —— 同一张令牌第二次提交，返回 409「确认令牌已经使用」
 # 前三道是无状态判断，只看令牌本身；第四道靠 consumed_confirmation_tokens 的主键冲突判定，
 # 所以并发提交也只会放行一次。验签排在判重之前：被改过的令牌返回 400 而不是 409，
@@ -64,3 +71,4 @@ Content-Type: application/json
 ### 离线评测——dataset_path 指向你自己的评测集 JSONL
 ### 返回 sample 口径（三层全过才算一条通过）与 layers 分层口径，并回显本次使用的 model
 POST {{baseUrl}}/evaluations/run?dataset_path=D:/path/to/dataset.jsonl
+X-CSRF-Token: {{csrfToken}}

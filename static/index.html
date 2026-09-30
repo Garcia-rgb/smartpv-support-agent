@@ -205,12 +205,47 @@
   .typing span:nth-child(3) { animation-delay: .36s; }
   @keyframes b { 0%, 60%, 100% { opacity: .3; } 30% { opacity: 1; } }
   .err { color: var(--danger); font-size: 13px; }
+  [hidden] { display: none !important; }
+  .login-screen { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+  .login-card { width: min(100%, 390px); background: var(--panel); padding: 28px;
+    border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
+  .login-card h1 { font-size: 20px; margin: 0 0 6px; }
+  .login-card p { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .login-card label { display: block; font-size: 13px; margin: 12px 0 5px; }
+  .login-card input { width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+    border-radius: 9px; font: inherit; }
+  .login-card .primary { width: 100%; margin: 20px 0 0; }
 
   @media (max-width: 860px) { .sidebar { display: none; } }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="login-screen" id="loginScreen">
+  <form class="login-card" id="loginForm">
+    <h1>登录技术支持助手</h1>
+    <p>请使用管理员账号登录。</p>
+    <label for="loginName">账号</label>
+    <input id="loginName" name="username" value="admin" autocomplete="username" required>
+    <label for="loginPassword">密码</label>
+    <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+    <div class="err" id="loginError" role="alert"></div>
+    <button class="primary" type="submit">登录</button>
+  </form>
+</div>
+<div class="login-screen" id="passwordScreen" hidden>
+  <form class="login-card" id="passwordForm">
+    <h1>修改管理员密码</h1>
+    <p>修改后需要重新登录。</p>
+    <label for="currentPassword">当前密码</label>
+    <input id="currentPassword" type="password" autocomplete="current-password" required>
+    <label for="newPassword">新密码（至少 12 个字符）</label>
+    <input id="newPassword" type="password" autocomplete="new-password" minlength="12" required>
+    <div class="err" id="passwordError" role="alert"></div>
+    <button class="primary" type="submit">保存新密码</button>
+    <button class="ghost" id="passwordCancel" type="button" style="width:100%;margin-top:8px">取消</button>
+  </form>
+</div>
+<div class="app" id="appRoot" hidden>
   <aside class="sidebar">
     <div class="brand">
       <h1>光伏电站技术支持</h1>
@@ -235,7 +270,9 @@
       <span class="title">技术支持助手</span>
       <span class="badge" id="modeBadge">…</span>
       <span class="spacer"></span>
-      <span class="badge" id="userBadge">demo-user</span>
+      <span class="badge" id="userBadge">未登录</span>
+      <button class="ghost" id="passwordBtn" type="button">修改密码</button>
+      <button class="ghost" id="logoutBtn" type="button">退出</button>
     </div>
 
     <div class="messages" id="messages">
@@ -259,7 +296,7 @@
 </div>
 
 <script>
-const state = { sessionId: null, userId: 'demo-user', busy: false };
+const state = { sessionId: null, userId: null, csrfToken: null, busy: false };
 
 const WORKFLOWS = {
   ticket: {
@@ -292,14 +329,88 @@ function fmt(s) {
 }
 
 async function api(path, options) {
-  const res = await fetch(path, options);
+  options = options || {};
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (state.csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    headers.set('X-CSRF-Token', state.csrfToken);
+  }
+  const res = await fetch(path, { ...options, headers, credentials: 'same-origin' });
   if (!res.ok) {
     let detail = 'HTTP ' + res.status;
     try { const j = await res.json(); if (j && j.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch (e) {}
+    if (res.status === 401 && path !== '/auth/login' && path !== '/auth/me') showLogin();
     throw new Error(detail);
   }
+  if (res.status === 204) return null;
   return res.json();
 }
+
+function showLogin() {
+  state.userId = null;
+  state.csrfToken = null;
+  state.sessionId = null;
+  $('appRoot').hidden = true;
+  $('passwordScreen').hidden = true;
+  $('loginScreen').hidden = false;
+  $('loginPassword').value = '';
+}
+
+function showApp(user) {
+  state.userId = user.user_id;
+  state.csrfToken = user.csrf_token;
+  $('userBadge').textContent = user.username + ' · ' + user.role;
+  $('uploadBtn').hidden = user.role !== 'admin';
+  $('loginScreen').hidden = true;
+  $('passwordScreen').hidden = true;
+  $('appRoot').hidden = false;
+  loadSessions();
+  input.focus();
+}
+
+$('loginForm').onsubmit = async function (event) {
+  event.preventDefault();
+  $('loginError').textContent = '';
+  const button = $('loginForm').querySelector('button');
+  button.disabled = true;
+  try {
+    const user = await api('/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('loginName').value.trim(), password: $('loginPassword').value }),
+    });
+    showApp(user);
+  } catch (error) { $('loginError').textContent = error.message; }
+  finally { button.disabled = false; }
+};
+
+$('logoutBtn').onclick = async function () {
+  try { await api('/auth/logout', { method: 'POST' }); }
+  finally { showLogin(); }
+};
+
+$('passwordBtn').onclick = function () {
+  $('passwordError').textContent = '';
+  $('currentPassword').value = '';
+  $('newPassword').value = '';
+  $('passwordScreen').hidden = false;
+  $('currentPassword').focus();
+};
+$('passwordCancel').onclick = function () { $('passwordScreen').hidden = true; };
+$('passwordForm').onsubmit = async function (event) {
+  event.preventDefault();
+  $('passwordError').textContent = '';
+  try {
+    await api('/auth/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        current_password: $('currentPassword').value,
+        new_password: $('newPassword').value,
+      }),
+    });
+    showLogin();
+    $('loginError').textContent = '密码已修改，请重新登录';
+  } catch (error) { $('passwordError').textContent = error.message; }
+};
 
 /* ---------- 消息渲染 ---------- */
 function addUser(text) {
@@ -494,7 +605,7 @@ function pendingBlock(action) {
       const ticket = await api('/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmation_token: action.confirmation_token, user_id: state.userId }),
+        body: JSON.stringify({ confirmation_token: action.confirmation_token }),
       });
       box.innerHTML = '<div class="ok">工单已创建 · 编号 ' + esc(ticket.id.slice(0, 8)) +
         (ticket.device_sn ? ' · 设备 ' + esc(ticket.device_sn) : '') +
@@ -564,7 +675,7 @@ async function send(text) {
   autoGrow();
   addTyping();
   try {
-    const body = { message: text, user_id: state.userId };
+    const body = { message: text };
     if (state.sessionId) body.session_id = state.sessionId;
     const res = await api('/chat', {
       method: 'POST',
@@ -628,7 +739,7 @@ function autoGrow() {
 
 async function loadSessions() {
   try {
-    const data = await api('/sessions?limit=20', { headers: { 'X-User-Id': state.userId } });
+    const data = await api('/sessions?limit=20');
     const box = $('sessionList');
     if (!data.items.length) {
       box.innerHTML = '<div class="hint" style="padding:4px 2px">暂无会话</div>';
@@ -648,7 +759,7 @@ async function loadSessions() {
 async function openSession(id) {
   if (state.busy) return;
   try {
-    const s = await api('/sessions/' + id, { headers: { 'X-User-Id': state.userId } });
+    const s = await api('/sessions/' + id);
     state.sessionId = id;
     wrap.innerHTML = '';
     s.messages.forEach(function (m) {
@@ -747,8 +858,7 @@ Object.entries(WORKFLOWS).forEach(function ([key, item]) {
 
 showEmpty();
 checkHealth();
-loadSessions();
-input.focus();
+api('/auth/me').then(showApp).catch(showLogin);
 </script>
 </body>
 </html>

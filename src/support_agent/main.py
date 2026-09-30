@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import os
+import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -14,6 +16,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     Response,
     UploadFile,
     status,
@@ -33,16 +36,21 @@ from .models import (
     ConsumedConfirmationToken,
     Conversation,
     Feedback,
+    LoginSession,
     Message,
     Ticket,
+    UserAccount,
 )
 from .observability import request_observability
 from .schemas import (
+    AuthResponse,
     ChatRequest,
     ChatResponse,
     DocumentResponse,
     EvaluationResponse,
     FeedbackRequest,
+    LoginRequest,
+    PasswordChangeRequest,
     QuizResponse,
     SessionListResponse,
     SessionResponse,
@@ -50,6 +58,16 @@ from .schemas import (
     TicketResponse,
 )
 from .services.agent import SupportAgent
+from .services.auth import (
+    COOKIE_NAME,
+    SESSION_SECONDS,
+    admin_user,
+    csrf_token,
+    current_user,
+    hash_password,
+    token_hash,
+    verify_password,
+)
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
 from .services.llm import OpenAICompatibleClient
@@ -106,8 +124,96 @@ UploadDep = Annotated[UploadFile, File()]
 OptionalQuizUpload = Annotated[UploadFile | None, File()]
 OptionalQuizText = Annotated[str | None, Form()]
 UserHeader = Annotated[str, Header()]
+AuthenticatedUser = Annotated[UserAccount | None, Depends(current_user)]
+AdminUser = Annotated[UserAccount | None, Depends(admin_user)]
 
 # 上面的类型别名同时描述参数类型和 FastAPI 的依赖来源，减少接口中的重复代码。
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(
+    credentials: LoginRequest,
+    request: Request,
+    response: Response,
+    db: DbDep,
+    settings: SettingsDep,
+) -> AuthResponse:
+    if not settings.auth_enabled:
+        raise HTTPException(404, "登录未启用")
+    login_origin = request.client.host if request.client else "unknown"
+    rate = await get_rate_limiter(settings).check(f"login:{login_origin}")
+    if not rate.allowed:
+        raise HTTPException(429, "登录尝试过于频繁，请稍后再试", headers=rate.headers)
+    account = await db.scalar(
+        select(UserAccount).where(UserAccount.username == credentials.username)
+    )
+    if not account or not account.active or not verify_password(
+        credentials.password, account.password_hash
+    ):
+        raise HTTPException(401, "账号或密码错误")
+    token = secrets.token_urlsafe(32)
+    db.add(LoginSession(
+        token_hash=token_hash(token), user_id=account.id,
+        expires_at=int(time.time()) + SESSION_SECONDS,
+    ))
+    db.add(AuditLog(actor=account.id, action="login", resource="session"))
+    await db.commit()
+    response.set_cookie(
+        COOKIE_NAME, token, max_age=SESSION_SECONDS,
+        httponly=True, secure=settings.app_env != "development" or request.url.scheme == "https",
+        samesite="lax", path="/",
+    )
+    return AuthResponse(
+        user_id=account.id, username=account.username, role=account.role,
+        csrf_token=csrf_token(token, settings.confirmation_secret),
+    )
+
+
+@app.get("/auth/me", response_model=AuthResponse)
+async def auth_me(
+    request: Request, user: AuthenticatedUser, settings: SettingsDep,
+) -> AuthResponse:
+    if user is None:
+        raise HTTPException(401, "请先登录")
+    return AuthResponse(
+        user_id=user.id, username=user.username, role=user.role,
+        csrf_token=csrf_token(request.cookies[COOKIE_NAME], settings.confirmation_secret),
+    )
+
+
+@app.post("/auth/logout", status_code=204)
+async def logout(
+    request: Request, response: Response, user: AuthenticatedUser, db: DbDep,
+) -> None:
+    if user is None:
+        raise HTTPException(401, "请先登录")
+    login_session = await db.get(LoginSession, token_hash(request.cookies[COOKIE_NAME]))
+    if login_session:
+        await db.delete(login_session)
+        await db.commit()
+    response.delete_cookie(COOKIE_NAME, path="/")
+
+
+@app.post("/auth/password", status_code=204)
+async def change_password(
+    body: PasswordChangeRequest,
+    response: Response,
+    user: AuthenticatedUser,
+    db: DbDep,
+) -> None:
+    if user is None:
+        raise HTTPException(401, "请先登录")
+    if not verify_password(body.current_password, user.password_hash):
+        raise HTTPException(400, "当前密码错误")
+    user.password_hash = hash_password(body.new_password)
+    sessions = (await db.scalars(
+        select(LoginSession).where(LoginSession.user_id == user.id)
+    )).all()
+    for session in sessions:
+        await db.delete(session)
+    db.add(AuditLog(actor=user.id, action="password_changed", resource=user.id))
+    await db.commit()
+    response.delete_cookie(COOKIE_NAME, path="/")
 
 
 @app.get("/health")
@@ -151,6 +257,7 @@ async def upload_document(
     file: UploadDep,
     db: DbDep,
     settings: SettingsDep,
+    _admin: AdminUser,
 ) -> DocumentResponse:
     filename = Path(file.filename or "").name
     if not filename:
@@ -175,6 +282,7 @@ async def upload_document(
 async def analyze_quiz(
     db: DbDep,
     settings: SettingsDep,
+    _user: AuthenticatedUser,
     file: OptionalQuizUpload = None,
     recognized_text: OptionalQuizText = None,
 ) -> QuizResponse:
@@ -219,10 +327,12 @@ async def chat(
     db: DbDep,
     settings: SettingsDep,
     response: Response,
+    user: AuthenticatedUser,
 ) -> ChatResponse:
     # 限流放在最前面：被拒的请求不该产生会话、消息和模型调用。
     # 一次 /chat 可能触发多轮模型往返，是整套接口里最贵的那一个。
-    decision = await get_rate_limiter(settings).check(request.user_id)
+    user_id = user.id if user else request.user_id
+    decision = await get_rate_limiter(settings).check(user_id)
     if not decision.allowed:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
@@ -232,7 +342,7 @@ async def chat(
     response.headers.update(decision.headers)
     try:
         return await SupportAgent(db, settings).respond(
-            request.message, request.session_id, request.user_id
+            request.message, request.session_id, user_id
         )
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
@@ -250,18 +360,22 @@ DatasetPathQuery = Annotated[str, Query(description="评测数据集 JSONL 文�
 @app.get("/sessions", response_model=SessionListResponse)
 async def list_sessions(
     db: DbDep,
+    user: AuthenticatedUser,
     x_user_id: UserHeader = "demo-user",
     limit: LimitQuery = 10,
     offset: OffsetQuery = 0,
 ) -> SessionListResponse:
+    owner_filter = [] if user and user.role == "admin" else [
+        Conversation.user_id == (user.id if user else x_user_id)
+    ]
     total = await db.scalar(
-        select(func.count()).select_from(Conversation).where(Conversation.user_id == x_user_id)
+        select(func.count()).select_from(Conversation).where(*owner_filter)
     )
 
     conversations = (
         await db.scalars(
             select(Conversation)
-            .where(Conversation.user_id == x_user_id)
+            .where(*owner_filter)
             .order_by(
                 Conversation.created_at.desc(),
                 Conversation.id.desc(),
@@ -283,10 +397,16 @@ async def list_sessions(
 async def get_session(
     session_id: str,
     db: DbDep,
+    user: AuthenticatedUser,
     x_user_id: UserHeader = "demo-user",
 ) -> SessionResponse:
     conversation = await db.scalar(
-        select(Conversation).where(Conversation.id == session_id, Conversation.user_id == x_user_id)
+        select(Conversation).where(
+            Conversation.id == session_id,
+            *([] if user and user.role == "admin" else [
+                Conversation.user_id == (user.id if user else x_user_id)
+            ]),
+        )
     )
     if not conversation:
         raise HTTPException(404, "会话不存在")
@@ -304,9 +424,16 @@ async def get_session(
 
 
 @app.post("/feedback", status_code=status.HTTP_201_CREATED)
-async def create_feedback(request: FeedbackRequest, db: DbDep) -> dict:
-    if not await db.get(Message, request.message_id):
+async def create_feedback(
+    request: FeedbackRequest, db: DbDep, user: AuthenticatedUser,
+) -> dict:
+    message = await db.get(Message, request.message_id)
+    if not message:
         raise HTTPException(404, "消息不存在")
+    if user and user.role != "admin":
+        conversation = await db.get(Conversation, message.session_id)
+        if not conversation or conversation.user_id != user.id:
+            raise HTTPException(404, "消息不存在")
     feedback = Feedback(**request.model_dump())
     db.add(feedback)
     await db.commit()
@@ -319,6 +446,7 @@ async def create_ticket(
     request: TicketCreateRequest,
     db: DbDep,
     settings: SettingsDep,
+    user: AuthenticatedUser,
 ) -> TicketResponse:
     try:
         payload = verify_confirmation_token(
@@ -326,12 +454,17 @@ async def create_ticket(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if payload.get("action") != "create_ticket" or payload.get("user_id") != request.user_id:
+    user_id = user.id if user else request.user_id
+    if payload.get("action") != "create_ticket" or payload.get("user_id") != user_id:
         raise HTTPException(403, "确认令牌与当前操作或用户不匹配")
+    if user and user.role != "admin":
+        conversation = await db.get(Conversation, payload.get("session_id"))
+        if not conversation or conversation.user_id != user.id:
+            raise HTTPException(403, "无权操作该会话")
     token_hash = hashlib.sha256(request.confirmation_token.encode()).hexdigest()
     # 先占位、再建单：把「这个令牌用过没有」变成一次主键冲突判定。
     # 只存哈希不存原文——令牌本身就是凭证，落库等于多留一份可用的口令。
-    consumed = ConsumedConfirmationToken(token_hash=token_hash, user_id=request.user_id)
+    consumed = ConsumedConfirmationToken(token_hash=token_hash, user_id=user_id)
     db.add(consumed)
     try:
         await db.flush()
@@ -350,7 +483,7 @@ async def create_ticket(
     consumed.ticket_id = ticket.id
     db.add(
         AuditLog(
-            actor=request.user_id,
+            actor=user_id,
             action="confirmation_consumed",
             resource=token_hash,
             detail={"ticket_id": ticket.id},
@@ -363,7 +496,7 @@ async def create_ticket(
 
 @app.post("/evaluations/run", response_model=EvaluationResponse)
 async def evaluation(
-    db: DbDep, settings: SettingsDep, dataset_path: DatasetPathQuery
+    db: DbDep, settings: SettingsDep, dataset_path: DatasetPathQuery, _admin: AdminUser,
 ) -> EvaluationResponse:
     # 评测集不进仓库：它是随知识库变化的，由调用方指定路径，避免接口写死一份语料。
     try:

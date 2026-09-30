@@ -20,7 +20,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install smartpv_support_agent-1.5.2-py3-none-any.whl
+pip install smartpv_support_agent-1.6.0-py3-none-any.whl
 ```
 
 装完先跑自检，把它当成部署门禁：
@@ -159,16 +159,15 @@ server {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-User-Id $http_x_user_id;   # 见下方「认证」
         proxy_read_timeout 120s;      # 默认 60s 会在长回答上截断
         proxy_send_timeout 120s;
     }
 }
 ```
 
-**认证不在这个服务里。** `user_id` 是客户端自称的（请求体字段或 `X-User-Id` 头），服务端只做「用户之间不串数据」，
-不做身份校验。放到公网前必须在前面加一层认证网关，由网关注入可信身份、并覆盖掉客户端传来的值。
-这是刻意的边界，不是遗漏——见 [SECURITY.md](../SECURITY.md)。
+**首次部署需建立管理员账号。** 在应用工作目录运行 `python scripts/create_admin.py --generate`，保存只显示一次的密码。
+页面登录后服务端签发 HttpOnly 会话 Cookie；聊天、会话、导入和评测接口均按服务器验证的身份授权。
+生产环境仍需使用 HTTPS，并设置随机的 `CONFIRMATION_SECRET`。见 [SECURITY.md](../SECURITY.md)。
 
 ## 健康检查
 
@@ -196,7 +195,7 @@ curl -f http://127.0.0.1:8000/health
 - [ ] `scripts/check_schema.py` 两侧都没有漂移
 - [ ] `/health` 的 `embedding_backend` / `embedding_dimension` 与建库时一致
 - [ ] 语料已导入，`doctor` 报出的文档与片段数符合预期
-- [ ] 前面有一层真实认证，反向代理会覆盖客户端传来的 `X-User-Id`
+- [ ] 已创建 admin 账号，能登录、修改密码，未登录业务请求返回 401
 - [ ] 代理超时 ≥ 120s，`client_max_body_size` 与 `MAX_UPLOAD_BYTES` 对齐
 - [ ] 跑通一次冒烟：知识问答返回 `completed` / `knowledge`，写操作返回 `pending_confirmation`
 

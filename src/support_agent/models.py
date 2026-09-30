@@ -30,6 +30,24 @@ class Conversation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class UserAccount(Base):
+    __tablename__ = "user_accounts"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
+    role: Mapped[str] = mapped_column(String(16), default="admin")
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LoginSession(Base):
+    __tablename__ = "login_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    expires_at: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Message(Base):
     """会话中的单条消息，可保存 RAG 引用信息。"""
 

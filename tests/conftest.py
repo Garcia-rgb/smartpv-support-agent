@@ -52,6 +52,7 @@ async def client(db_session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
         database_url="sqlite+aiosqlite:///unused.db",
         confirmation_secret="test-secret",
         max_upload_bytes=1024 * 1024,
+        auth_enabled=False,
     )
 
     async def override_db():
