@@ -20,7 +20,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install smartpv_support_agent-1.7.1-py3-none-any.whl
+pip install smartpv_support_agent-1.8.0-py3-none-any.whl
 ```
 
 装完先跑自检，把它当成部署门禁：

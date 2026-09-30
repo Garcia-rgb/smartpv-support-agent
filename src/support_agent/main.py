@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from fastapi import (
     Depends,
@@ -54,6 +54,7 @@ from .schemas import (
     ManagedUser,
     ManagedUserList,
     PasswordChangeRequest,
+    PointTableGenerateRequest,
     QuizResponse,
     SessionListResponse,
     SessionResponse,
@@ -77,6 +78,7 @@ from .services.auth import (
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
 from .services.llm import OpenAICompatibleClient
+from .services.pointtable import PointTableError, generate_csv, list_templates
 from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
@@ -315,6 +317,33 @@ async def reset_user_password(
     await db.refresh(user)
     response.headers["Cache-Control"] = "no-store"
     return UserCredentialResponse(user=user, initial_password=password)
+
+
+@app.get("/point-tables/templates")
+async def point_table_templates(user: AuthenticatedUser) -> dict:
+    if user is None:
+        raise HTTPException(403, "需要登录账号")
+    return {"items": list_templates()}
+
+
+@app.post("/point-tables/generate")
+async def make_point_table(body: PointTableGenerateRequest, user: AuthenticatedUser) -> Response:
+    if user is None:
+        raise HTTPException(403, "需要登录账号")
+    try:
+        content, filename = generate_csv(body.template_id, body.fields)
+    except PointTableError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                "attachment; filename=point-table.csv; filename*=UTF-8''" + quote(filename)
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/health")

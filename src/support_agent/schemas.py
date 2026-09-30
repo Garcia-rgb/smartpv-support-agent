@@ -85,6 +85,11 @@ class UserCredentialResponse(BaseModel):
     initial_password: str
 
 
+class PointTableGenerateRequest(BaseModel):
+    template_id: str = Field(min_length=1, max_length=64)
+    fields: dict[str, str] = Field(default_factory=dict)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None

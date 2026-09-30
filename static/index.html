@@ -186,6 +186,14 @@
   .workflow-panel[hidden] { display: none; }
   .workflow-panel strong { color: var(--text); }
   .workflow-panel .close { float: right; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+  .pointtable-form { margin-top: 10px; }
+  .pointtable-form label { display: block; font-size: 13px; color: #44566b; }
+  .pointtable-form input, .pointtable-form select { display: block; width: 100%; margin-top: 4px;
+    padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; background: #fff; }
+  .pointtable-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+    margin: 12px 0; }
+  .pointtable-form .primary { margin: 12px 0 0; }
+  .pointtable-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
   .quiz-answer { font-size: 20px; font-weight: 700; color: var(--brand); margin: 2px 0 8px; }
   .quiz-stem { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
   .quiz-edit { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 8px; }
@@ -232,6 +240,7 @@
   @media (max-width: 480px) {
     .user-create { flex-direction: column; align-items: stretch; }
     .user-create button.primary { width: 100%; }
+    .pointtable-fields { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -340,9 +349,9 @@ const WORKFLOWS = {
   },
   pointTable: {
     label: '点表制作',
-    title: '点表制作准备',
-    description: '请准备设备协议和目标平台已成功导入的点表样例。当前可查询制作规则；自动生成、校验和导出仍在建设中。',
-    placeholder: '先描述设备型号、通信协议和目标平台的点表要求',
+    title: '点表制作',
+    description: '选择资料库中的模板，补齐现场信息后生成 CSV。',
+    placeholder: '也可以在这里询问点表规则或设备协议',
   },
 };
 
@@ -938,22 +947,107 @@ $('fileInput').onchange = async function (e) {
 
 const chipBox = $('chips');
 const workflowPanel = $('workflowPanel');
+async function showPointTableForm() {
+  workflowPanel.innerHTML =
+    '<button class="close" type="button" aria-label="关闭点表制作">✕</button>' +
+    '<strong>点表制作</strong><div>选择资料库模板，补齐缺失项后生成 CSV。</div>' +
+    '<div class="pointtable-form"><label for="ptTemplate">模板<select id="ptTemplate"></select></label>' +
+    '<div class="pointtable-note" id="ptDescription"></div>' +
+    '<div class="pointtable-fields" id="ptFields"></div>' +
+    '<div class="pointtable-note" id="ptCaution"></div>' +
+    '<div class="err" id="ptError" role="alert"></div>' +
+    '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div>';
+  workflowPanel.querySelector('.close').onclick = closeWorkflow;
+  try {
+    const result = await api('/point-tables/templates');
+    if (workflowPanel.hidden || !$('ptTemplate')) return;
+    if (!result.items.length) {
+      $('ptError').textContent = '资料库里还没有可用的点表模板';
+      $('ptGenerate').disabled = true;
+      return;
+    }
+    const select = $('ptTemplate');
+    result.items.forEach((template) => {
+      const option = document.createElement('option');
+      option.value = template.id;
+      option.textContent = template.name;
+      select.appendChild(option);
+    });
+    function renderFields() {
+      const template = result.items.find((item) => item.id === select.value);
+      $('ptDescription').textContent = template.description;
+      $('ptCaution').textContent = template.caution;
+      $('ptFields').innerHTML = '';
+      template.required_fields.forEach((field) => {
+        const label = document.createElement('label');
+        label.textContent = field;
+        const input = document.createElement('input');
+        input.name = field;
+        input.required = true;
+        input.maxLength = 64;
+        if (field === 'MODBUS设备地址') {
+          input.type = 'number'; input.min = '1'; input.max = '247';
+        }
+        label.appendChild(input);
+        $('ptFields').appendChild(label);
+      });
+      $('ptError').textContent = '';
+    }
+    select.onchange = renderFields;
+    renderFields();
+    $('ptGenerate').onclick = async function () {
+      const template = result.items.find((item) => item.id === select.value);
+      const fields = {};
+      for (const field of template.required_fields) {
+        const value = [...$('ptFields').querySelectorAll('input')]
+          .find((item) => item.name === field).value.trim();
+        if (!value) { $('ptError').textContent = '请填写' + field; return; }
+        fields[field] = value;
+      }
+      $('ptError').textContent = '';
+      $('ptGenerate').disabled = true;
+      try {
+        const res = await fetch('/point-tables/generate', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
+          body: JSON.stringify({ template_id: template.id, fields }),
+        });
+        if (!res.ok) {
+          const error = await res.json();
+          if (res.status === 401) showLogin();
+          throw new Error(error.detail || '生成失败');
+        }
+        const url = URL.createObjectURL(await res.blob());
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = template.name.replace(' · ', '_') + '.csv';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { $('ptError').textContent = error.message; }
+      finally { $('ptGenerate').disabled = false; }
+    };
+  } catch (error) { if ($('ptError')) $('ptError').textContent = error.message; }
+}
+function closeWorkflow() {
+  workflowPanel.hidden = true;
+  chipBox.querySelectorAll('.chip').forEach((chip) => chip.classList.remove('active'));
+  input.placeholder = defaultPlaceholder;
+}
 function openWorkflow(key) {
   const item = WORKFLOWS[key];
-  workflowPanel.innerHTML =
-    '<button class="close" type="button" aria-label="关闭提示">✕</button>' +
-    '<strong>' + esc(item.title) + '</strong><div>' + esc(item.description) + '</div>';
   workflowPanel.hidden = false;
-  workflowPanel.querySelector('.close').onclick = function () {
-    workflowPanel.hidden = true;
-    chipBox.querySelectorAll('.chip').forEach((chip) => chip.classList.remove('active'));
-    input.placeholder = defaultPlaceholder;
-  };
+  if (key === 'pointTable') showPointTableForm();
+  else {
+    workflowPanel.innerHTML =
+      '<button class="close" type="button" aria-label="关闭提示">✕</button>' +
+      '<strong>' + esc(item.title) + '</strong><div>' + esc(item.description) + '</div>';
+    workflowPanel.querySelector('.close').onclick = closeWorkflow;
+  }
   chipBox.querySelectorAll('.chip').forEach((chip) => {
     chip.classList.toggle('active', chip.dataset.workflow === key);
   });
   input.placeholder = item.placeholder;
-  input.focus();
+  if (key !== 'pointTable') input.focus();
 }
 Object.entries(WORKFLOWS).forEach(function ([key, item]) {
   const b = document.createElement('button');
