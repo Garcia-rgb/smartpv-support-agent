@@ -27,12 +27,23 @@ def settings(**overrides: Any) -> Settings:
 
 
 def llm_settings() -> Settings:
-    """三项配置齐全，llm_enabled 才会为真。"""
+    """显式允许且三项配置齐全，llm_enabled 才会为真。"""
     return settings(
         llm_base_url="https://llm.invalid/v1",
         llm_api_key="test-key",
         llm_model="test-model",
+        allow_remote_llm=True,
     )
+
+
+def test_remote_model_requires_explicit_permission() -> None:
+    configured = settings(
+        llm_base_url="https://llm.invalid/v1",
+        llm_api_key="test-key",
+        llm_model="test-model",
+    )
+    assert configured.llm_enabled is False
+    assert llm_settings().llm_enabled is True
 
 
 class CapturingModel:

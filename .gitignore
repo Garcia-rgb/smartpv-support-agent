@@ -1,5 +1,7 @@
 .env
 .venv/
+.localdeps/
+.testdeps/
 .vscode/
 .idea/
 __pycache__/
@@ -19,3 +21,6 @@ htmlcov/
 .coverage
 dist/
 build/
+
+# 本地内部资料原件及转换稿，不提交到公开仓库
+/knowledge_base/

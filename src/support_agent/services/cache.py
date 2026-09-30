@@ -457,6 +457,7 @@ async def load_hits_by_id(
     *,
     corpus_id: str | None,
     include_restricted: bool,
+    visibility: str | None = None,
 ) -> list[tuple[DocumentChunk, SourceDocument, float]]:
     """按缓存的 id 回库取片段，过滤掉已不存在或已越权的记录。
 
@@ -479,6 +480,11 @@ async def load_hits_by_id(
         if corpus_id and metadata.get("corpus_id") != corpus_id:
             continue
         if not include_restricted and metadata.get("restricted") is True:
+            continue
+        is_public = metadata.get("visibility") == "public"
+        if (visibility == "public" and not is_public) or (
+            visibility == "private" and is_public
+        ):
             continue
         found[str(chunk.id)] = (chunk, document)
 

@@ -8,6 +8,7 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     Header,
     HTTPException,
     Query,
@@ -15,6 +16,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
@@ -39,6 +41,7 @@ from .schemas import (
     DocumentResponse,
     EvaluationResponse,
     FeedbackRequest,
+    QuizResponse,
     SessionListResponse,
     SessionResponse,
     TicketCreateRequest,
@@ -47,6 +50,9 @@ from .schemas import (
 from .services.agent import SupportAgent
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
+from .services.llm import OpenAICompatibleClient
+from .services.privacy import classify_question
+from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
 from .services.security import verify_confirmation_token
 
@@ -94,6 +100,8 @@ app.middleware("http")(request_observability)
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 UploadDep = Annotated[UploadFile, File()]
+OptionalQuizUpload = Annotated[UploadFile | None, File()]
+OptionalQuizText = Annotated[str | None, Form()]
 UserHeader = Annotated[str, Header()]
 
 # 上面的类型别名同时描述参数类型和 FastAPI 的依赖来源，减少接口中的重复代码。
@@ -110,6 +118,8 @@ async def health(settings: SettingsDep) -> dict:
         "version": __version__,
         "environment": settings.app_env,
         "llm_enabled": settings.llm_enabled,
+        "local_llm_enabled": settings.local_llm_enabled,
+        "privacy_routing_enabled": settings.privacy_routing_enabled,
         "embedding_backend": settings.embedding_backend,
         "embedding_dimension": settings.vector_dimension,
         "cache": get_store(settings).describe(),
@@ -141,6 +151,48 @@ async def upload_document(
     return DocumentResponse(
         id=document.id, filename=document.filename, chunks=chunks, duplicate=duplicate
     )
+
+
+@app.post("/quiz/analyze", response_model=QuizResponse)
+async def analyze_quiz(
+    db: DbDep,
+    settings: SettingsDep,
+    file: OptionalQuizUpload = None,
+    recognized_text: OptionalQuizText = None,
+) -> QuizResponse:
+    """图片只在本机内存中识别；可提交修正后的文字重新分析。"""
+    if recognized_text:
+        raw_text = recognized_text.strip()
+    elif file:
+        if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise HTTPException(400, "请上传 PNG、JPG 或 WebP 图片")
+        data = await file.read(settings.max_upload_bytes + 1)
+        if len(data) > settings.max_upload_bytes:
+            raise HTTPException(413, "图片超过大小限制")
+        try:
+            raw_text = await run_in_threadpool(recognize_image, data)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        raise HTTPException(400, "请上传题目截图或填写识别文字")
+    try:
+        decision = (
+            await classify_question(raw_text, RAGService(db), settings)
+            if settings.privacy_routing_enabled else None
+        )
+        public = decision is not None and decision.scope == "public"
+        return await answer_question(
+            db,
+            raw_text,
+            chunk_size=settings.chunk_size,
+            overlap=settings.chunk_overlap,
+            llm_client=OpenAICompatibleClient(
+                settings, local=settings.privacy_routing_enabled and not public
+            ),
+            visibility="public" if public else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/chat", response_model=ChatResponse)

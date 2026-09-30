@@ -10,7 +10,7 @@
 
    ```bash
    python -m support_agent serve --port 8030
-   python -m support_agent version     # 应报 1.3.2
+   python -m support_agent version     # 应报 1.4.0
    ```
 
    先手动问一个问题把模型链路预热一次（首次调用要加载向量模型，会多花几秒）。

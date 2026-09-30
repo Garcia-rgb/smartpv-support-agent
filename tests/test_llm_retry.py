@@ -12,6 +12,7 @@ def remote_settings() -> Settings:
         llm_base_url="https://llm.test/v1",
         llm_api_key="test-key",
         llm_model="test-model",
+        allow_remote_llm=True,
     )
 
 

@@ -29,6 +29,14 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     llm_model: str | None = None
+    # 公司资料默认只在本机处理；配置了密钥也不会自动启用外部模型。
+    allow_remote_llm: bool = False
+    # 双资料库分流需显式开启；开启后内部问题绝不调用远程模型。
+    privacy_routing_enabled: bool = False
+    local_llm_base_url: str | None = None
+    local_llm_model: str | None = None
+    local_llm_api_key: str = "local"
+    public_search_api_key: str | None = None
     # 向量后端：hash 是零依赖兜底，onnx 是本地语义模型（需要模型目录）。
     embedding_backend: str = "hash"
     embedding_model_path: str | None = None
@@ -50,8 +58,21 @@ class Settings(BaseSettings):
 
     @property
     def llm_enabled(self) -> bool:
-        """只有远程模型所需的三项配置齐全时才启用模型调用。"""
-        return bool(self.llm_base_url and self.llm_api_key and self.llm_model)
+        """显式允许外发且远程模型配置齐全时才启用模型调用。"""
+        return bool(
+            self.allow_remote_llm and self.llm_base_url and self.llm_api_key and self.llm_model
+        )
+
+    @property
+    def local_llm_enabled(self) -> bool:
+        from urllib.parse import urlsplit
+
+        url = urlsplit(self.local_llm_base_url or "")
+        return bool(
+            self.local_llm_model
+            and url.scheme == "http"
+            and url.hostname in {"127.0.0.1", "localhost", "::1"}
+        )
 
     @property
     def vector_dimension(self) -> int:

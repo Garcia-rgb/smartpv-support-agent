@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -98,20 +99,36 @@ class AssistantTurn:
         return cls(content or "", calls, reasoning if isinstance(reasoning, str) else None)
 
 
+QUIZ_SYSTEM_PROMPT = (
+    "你是华为智能光伏认证考试的判题助手。\n"
+    "只能依据用户给出的资料原文判断，不得使用任何外部知识或自己的记忆。\n"
+    "回答必须是 JSON：{\"selected\": [\"B\"], \"reason\": \"依据……\"}。\n"
+    "单选时 selected 最多一个字母，多选时可以多个。\n"
+    "selected 里的字母必须是题目给出的选项字母之一；"
+    "若资料不足以确定答案，返回 {\"selected\": [], \"reason\": \"资料不足\"}。\n"
+    "不要输出 JSON 以外的任何文字。"
+)
+
+
 class OpenAICompatibleClient:
     """面向 OpenAI 兼容聊天接口的轻量适配器，不绑定具体模型厂商。"""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, local: bool = False):
         self.settings = settings
+        self.local = local
+
+    @property
+    def enabled(self) -> bool:
+        return self.settings.local_llm_enabled if self.local else self.settings.llm_enabled
 
     async def answer(self, question: str, contexts: list[str]) -> str:
         """知识问答：把检索片段放进提示词，要求模型只依据片段作答。"""
         # 未配置远程模型时使用本地回答，保证开发与测试不依赖 API 密钥。
-        if not self.settings.llm_enabled:
+        if not self.enabled:
             return self.local_answer(contexts)
         prompt = "\n\n".join(f"[资料{i + 1}] {text}" for i, text in enumerate(contexts))
         payload: dict[str, Any] = {
-            "model": self.settings.llm_model,
+            "model": self.settings.local_llm_model if self.local else self.settings.llm_model,
             "temperature": 0.1,
             "messages": [
                 {"role": "system", "content": ANSWER_SYSTEM_PROMPT},
@@ -124,6 +141,51 @@ class OpenAICompatibleClient:
             raise LLMError("模型回答不是非空字符串", "invalid_response", False)
         return content
 
+    async def select_options(
+        self, question: str, options: dict[str, str], contexts: list[str], *, multi: bool
+    ) -> tuple[list[str], str]:
+        """给模型的理财产品式判题：只准依据检索到的原文，在给定选项里挑。
+
+        拿不到可用配置、模型返回非法内容时抛 LLMError，由上游降级为「没有足够依据」——
+        判题宁可答不出，也不能让模型凭记忆编一个字母出来。
+        """
+        if not self.enabled:
+            raise LLMError("未配置可用模型", "disabled", False)
+        prompted = "\n\n".join(f"[资料{i + 1}] {text}" for i, text in enumerate(contexts))
+        option_lines = "\n".join(f"{key}. {value}" for key, value in options.items())
+        payload: dict[str, Any] = {
+            "model": self.settings.local_llm_model if self.local else self.settings.llm_model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": QUIZ_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"资料：\n{prompted}\n\n"
+                        f"题目（{'多选' if multi else '单选'}）：{question}\n"
+                        f"选项：\n{option_lines}"
+                    ),
+                },
+            ],
+        }
+        data = await self._chat(payload)
+        content = self._first_message(data).get("content")
+        if not isinstance(content, str) or not content:
+            raise LLMError("模型回答不是非空字符串", "invalid_response", False)
+        # 模型有时会把 JSON 包在 ```json 代码块里，直接抓最外层花括号即可。
+        chunk = content.strip()
+        start, end = chunk.find("{"), chunk.rfind("}")
+        if start < 0 or end < 0:
+            raise LLMError("模型没有返回 JSON", "invalid_response", False)
+        parsed = json.loads(chunk[start : end + 1])
+        raw_selected = parsed.get("selected") or []
+        reason = str(parsed.get("reason") or "")[:400]
+        # 模型选的字母必须落在题目给出的选项里，否则按没答处理。
+        selected = [str(k).upper() for k in raw_selected if str(k).upper() in options]
+        if not multi:
+            selected = selected[:1]
+        return selected, reason
+
     async def chat_with_tools(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None
     ) -> AssistantTurn:
@@ -132,10 +194,10 @@ class OpenAICompatibleClient:
         注意这里只负责“把模型的话翻译成 AssistantTurn”，不执行任何工具、
         也不判断工具名是否合法——那些必须留在服务端。
         """
-        if not self.settings.llm_enabled:
-            raise LLMError("未配置远程模型", "disabled", False)
+        if not self.enabled:
+            raise LLMError("未配置可用模型", "disabled", False)
         payload: dict[str, Any] = {
-            "model": self.settings.llm_model,
+            "model": self.settings.local_llm_model if self.local else self.settings.llm_model,
             # 思考模式下 temperature 不生效（不报错也不起作用），保留只是为了兼容非思考模式模型。
             "temperature": 0.1,
             "messages": messages,
@@ -149,10 +211,14 @@ class OpenAICompatibleClient:
 
     async def _chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         """统一处理超时、有限重试和错误分类；只返回模型响应的 JSON 原文。"""
-        url = f"{self.settings.llm_base_url.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.settings.llm_api_key}"}
+        if not self.enabled:
+            raise LLMError("未配置可用模型", "disabled", False)
+        base_url = self.settings.local_llm_base_url if self.local else self.settings.llm_base_url
+        api_key = self.settings.local_llm_api_key if self.local else self.settings.llm_api_key
+        url = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}"}
         # 网络请求只放在适配器中，上层 Agent 不需要关心具体接口格式。
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=120 if self.local else 30) as client:
             for attempt in range(MAX_ATTEMPTS):
                 try:
                     response = await client.post(url, json=payload, headers=headers)

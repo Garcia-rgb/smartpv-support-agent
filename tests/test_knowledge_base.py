@@ -110,7 +110,7 @@ async def test_ingest_corpus_stores_section_metadata(
     assert report.sections == 1
     assert report.chunks_created == 1
     assert stored.chunk_metadata["section_title"] == "1.1 MPPT"
-    assert stored.chunk_metadata["visibility"] == "local_only"
+    assert stored.chunk_metadata["visibility"] == "private"
     assert stored.chunk_metadata["source_file"] == "M1-基础.md"
     assert stored.chunk_metadata["corpus_id"] == "smartpv_v2"
 

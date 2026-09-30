@@ -37,7 +37,7 @@ Prompts 单独列出来的意义在于：**它是给人用的，不该由模型�
 `python scripts/mcp_client_demo.py`：
 
 ```text
-[握手] 连上 smartpv-device 1.3.2
+[握手] 连上 smartpv-device 1.4.0
 [Tools] query_device：按设备序列号查询逆变器型号、额定功率、运行状态、固件版本和并网情况。
 [调用 query_device] isError=False
   {"sn": "SN-2024-000123", "model": "SUN2000-100KTL-M1", ..., "grid_connected": true}

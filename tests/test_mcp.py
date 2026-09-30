@@ -6,6 +6,7 @@
 """
 
 import json
+import os
 import sys
 
 from mcp import ClientSession
@@ -14,7 +15,11 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from support_agent.mcp_server import DEVICE_CATALOG_URI
 from support_agent.services.tools import MOCK_DEVICES
 
-SERVER = StdioServerParameters(command=sys.executable, args=["-m", "support_agent.mcp_server"])
+SERVER = StdioServerParameters(
+    command=sys.executable,
+    args=["-m", "support_agent.mcp_server"],
+    env=os.environ.copy(),
+)
 
 
 async def test_server_exposes_tools_resources_and_prompts() -> None:

@@ -141,6 +141,12 @@ async def _embedding_row(settings: Any, deep: bool) -> Row:
 
 def _model_row(settings: Any) -> Row:
     """模型配置。密钥只报「已配置」，不打印内容。"""
+    if not settings.allow_remote_llm:
+        return (
+            "model",
+            WARN,
+            "remote model disabled (ALLOW_REMOTE_LLM=false) -> local rule-based model",
+        )
     if not settings.llm_enabled:
         return (
             "model",

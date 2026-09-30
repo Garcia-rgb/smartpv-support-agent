@@ -48,6 +48,17 @@ class ChatRequest(BaseModel):
     user_id: str = Field(default="demo-user", min_length=1, max_length=64)
 
 
+class QuizResponse(BaseModel):
+    status: Literal["answered", "insufficient_evidence", "needs_review"]
+    question_type: Literal["判断", "单选", "多选", "未知"]
+    question: str
+    options: dict[str, str]
+    selected_options: list[str]
+    explanation: str
+    citations: list[Citation]
+    recognized_text: str
+
+
 class PendingAction(BaseModel):
     action: Literal["create_ticket"]
     confirmation_token: str
@@ -96,6 +107,7 @@ class ChatResponse(BaseModel):
     status: ChatStatus = "completed"
     answer: str
     answer_source: AnswerSource = "model"
+    privacy_scope: Literal["public", "private"] | None = None
     citations: list[Citation] = []
     pending_action: PendingAction | None = None
     # 只有 needs_clarification 时才有值：说明判定原因与建议补充的信息。

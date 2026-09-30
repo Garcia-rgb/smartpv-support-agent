@@ -29,11 +29,19 @@ from ..schemas import (
 )
 from .agent_loop import LoopResult, ToolCallRecord, build_support_registry, run_agent_loop
 from .industry import describe_facets
-from .llm import OpenAICompatibleClient
+from .llm import LLMError, OpenAICompatibleClient
 from .local_model import RuleBasedLocalModel
+from .local_summary import summarize_local_retrieval
+from .privacy import classify_question, safe_web_query, search_public_web
+from .quiz import QuizResponse, answer_question, parse_question
 from .rag import RAGService, SearchHit
 from .security import create_confirmation_token, looks_like_prompt_injection
-from .tools import has_structured_anchor
+from .tools import (
+    ARITHMETIC_PATTERN,
+    DEVICE_SN_PATTERN,
+    TICKET_KEYWORDS,
+    has_structured_anchor,
+)
 
 INJECTION_ANSWER = "该请求可能试图绕过系统规则，我不能执行。你可以继续咨询公开的业务信息。"
 NO_EVIDENCE_ANSWER = "当前知识库没有找到足够可靠的依据，请补充问题信息或转人工确认。"
@@ -77,6 +85,16 @@ def _used_business_tool(result: LoopResult) -> bool:
     return any(record.ok and record.name in BUSINESS_TOOLS for record in result.tool_calls)
 
 
+def _local_tool_request(text: str) -> bool:
+    """仅让明确的计算、建单或设备状态查询走本地工具流程。"""
+    if ARITHMETIC_PATTERN.search(text) or any(word in text for word in TICKET_KEYWORDS):
+        return True
+    return bool(
+        DEVICE_SN_PATTERN.search(text.upper())
+        and any(word in text for word in ("运行状态", "设备状态", "现在什么状态"))
+    )
+
+
 def _dedupe_hits(hits: list[SearchHit], top_k: int) -> list[SearchHit]:
     """同一个片段可能被多轮检索命中，按片段去重并按相关度取前若干条。"""
     seen: set[str] = set()
@@ -114,6 +132,7 @@ class TurnOutcome:
     # 需要补充信息时带出原因与建议补充的内容，由调用方透传给客户端。
     clarification: Clarification | None = None
     blocked: bool = False
+    privacy_scope: str | None = None
 
 
 class SupportAgent:
@@ -124,8 +143,81 @@ class SupportAgent:
         self.settings = settings
         self.rag = RAGService(db, settings.chunk_size, settings.chunk_overlap)
         self.llm = OpenAICompatibleClient(settings)
-        # 远程模型三项配置齐全时才用它，否则退回本地规则模型。
-        self.model = model or (self.llm if settings.llm_enabled else RuleBasedLocalModel())
+        self.local_llm = OpenAICompatibleClient(settings, local=True)
+        # 隐私分流启用后，旧 Agent Loop 只能用本地模型处理结构化工具请求。
+        self.model = model or (
+            RuleBasedLocalModel()
+            if settings.privacy_routing_enabled
+            else (self.llm if settings.llm_enabled else RuleBasedLocalModel())
+        )
+
+    async def _privacy_knowledge_turn(self, text: str) -> TurnOutcome:
+        """模型调用前确定资料边界；公开调用绝不带历史或内部片段。"""
+        decision = await classify_question(text, self.rag, self.settings)
+        if decision.scope == "public":
+            hits = decision.public_hits
+            contexts = [hit.chunk.content for hit in hits[: self.settings.retrieval_top_k]]
+            answer = summarize_local_retrieval(text, hits)
+            model = self.llm if self.settings.llm_enabled else self.local_llm
+            if model.enabled:
+                try:
+                    answer = await model.answer(text, contexts)
+                except LLMError:
+                    pass
+            return TurnOutcome(
+                status="completed", answer=answer, answer_source="knowledge",
+                citations=self.rag.citations(hits), hits=hits,
+                conflicts=self.rag.detect_conflicts(hits), privacy_scope="public",
+            )
+
+        # 内部问题可以在本机同时利用两类资料，但不允许调用 self.llm。
+        hits = await self.retrieve(text)
+        if hits and hits[0].score >= 0.35:
+            answer = summarize_local_retrieval(text, hits)
+            if self.local_llm.enabled:
+                try:
+                    answer = await self.local_llm.answer(
+                        text, [hit.chunk.content for hit in hits]
+                    )
+                except LLMError:
+                    pass
+            return TurnOutcome(
+                status="completed", answer=answer, answer_source="knowledge",
+                citations=self.rag.citations(hits), hits=hits,
+                conflicts=self.rag.detect_conflicts(hits), privacy_scope="private",
+            )
+
+        safe_query = safe_web_query(text)
+        results = []
+        if safe_query:
+            try:
+                results = await search_public_web(safe_query, self.settings)
+            except (ValueError, OSError):
+                results = []
+            except Exception:
+                # 搜索服务故障只能降级，不能改用远程模型传原问题。
+                results = []
+        if results and self.settings.local_llm_enabled:
+            public_contexts = [
+                f"公开网页：{item['title']}\n{item['description']}\n{item['url']}"
+                for item in results
+            ]
+            try:
+                answer = await self.local_llm.answer(text, public_contexts)
+                answer += "\n\n公开检索来源：\n" + "\n".join(
+                    f"- {item['title']}：{item['url']}" for item in results[:3]
+                )
+                return TurnOutcome(
+                    status="completed", answer=answer, answer_source="knowledge",
+                    privacy_scope="private",
+                )
+            except LLMError:
+                pass
+        return TurnOutcome(
+            status="failed",
+            answer="内部资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。",
+            answer_source="policy", privacy_scope="private",
+        )
 
     async def _conversation(self, session_id: str | None, user_id: str) -> Conversation:
         """读取已有会话或创建新会话，同时检查会话归属。"""
@@ -269,6 +361,9 @@ class SupportAgent:
                 blocked=True,
             )
 
+        if self.settings.privacy_routing_enabled and not _local_tool_request(text):
+            return await self._privacy_knowledge_turn(text)
+
         # 语料范围判定必须前置。实测模型遇到明显跑题的问题（「Python 怎么装环境」）
         # 根本不会去调检索工具，它直接凭「我是光伏助手」拒答——于是下面那句
         # 「检索过但没有依据」的兜底永远等不到，判不判定全看模型心情。
@@ -339,9 +434,41 @@ class SupportAgent:
             outcome.answer_source = "policy"
         elif citations:
             outcome.answer_source = "knowledge"
+            if isinstance(self.model, RuleBasedLocalModel):
+                outcome.answer = summarize_local_retrieval(text, hits)
+                outcome.citations = self.rag.citations(hits[:3])
         elif _used_business_tool(result):
             outcome.answer_source = "tool"
         return outcome
+
+    async def _try_quiz(self, text: str) -> tuple[str, QuizResponse, str | None] | None:
+        """消息能解析成「题干 + 选项」就当作刷题请求处理，否则返回 None 走普通对话。
+
+        返回 (聊天回答文本, 刷题结果)；聊天文本是在 explanation 前面加上明确的选项结论。
+        """
+        try:
+            parse_question(text)
+        except ValueError:
+            return None
+        decision = (
+            await classify_question(text, self.rag, self.settings)
+            if self.settings.privacy_routing_enabled else None
+        )
+        public = decision is not None and decision.scope == "public"
+        result = await answer_question(
+            self.db, text,
+            llm_client=self.llm if public else (
+                self.local_llm if self.settings.privacy_routing_enabled else self.llm
+            ),
+            visibility="public" if public else None,
+        )
+        if result.selected_options:
+            head = f"**结论** 选 {'、'.join(result.selected_options)}。"
+        else:
+            head = "**结论** 资料里没有足够依据确定选项，以下供你核对："
+        return f"{head}\n\n{result.explanation}", result, (
+            decision.scope if decision else None
+        )
 
     async def respond(self, text: str, session_id: str | None, user_id: str) -> ChatResponse:
         """处理一轮用户消息：跑 Agent Loop，并把用户消息和最终回答一起保存。
@@ -349,12 +476,38 @@ class SupportAgent:
         判定全部交给 `run_turn`，这里只负责三件带副作用的事：
         建/读会话、写消息、给待确认的写操作签一张令牌。
         """
+        # 消息长得像一道题（有题干 + 至少两个选项）时直接走刷题判定，
+        # 让手打/粘贴在聊天框的题目也能拿到确定的选项，而不是一段不给结论的话术。
+        quiz = await self._try_quiz(text)
+        if quiz is not None:
+            quiz_answer, quiz_result, quiz_scope = quiz
+            conversation = await self._conversation(session_id, user_id)
+            await self._save_message(conversation.id, "user", text)
+            assistant_message = await self._save_message(
+                conversation.id,
+                "assistant",
+                quiz_answer,
+                [citation.model_dump() for citation in quiz_result.citations],
+            )
+            await self.db.commit()
+            return ChatResponse(
+                session_id=conversation.id,
+                message_id=assistant_message.id,
+                status="completed",
+                answer=quiz_answer,
+                answer_source="knowledge",
+                privacy_scope=quiz_scope,
+                citations=quiz_result.citations,
+            )
+
         conversation = await self._conversation(session_id, user_id)
         # 历史必须在写入本轮用户消息之前读取，否则本轮问题会在上下文里出现两次。
         history = await self._history(conversation.id)
         await self._save_message(conversation.id, "user", text)
 
         outcome = await self.run_turn(text, history)
+        if self.settings.privacy_routing_enabled and outcome.privacy_scope is None:
+            outcome.privacy_scope = "private"
 
         pending_action: PendingAction | None = None
         if outcome.status == "pending_confirmation":
@@ -383,6 +536,7 @@ class SupportAgent:
             status=outcome.status,
             answer=outcome.answer,
             answer_source=outcome.answer_source,
+            privacy_scope=outcome.privacy_scope,
             citations=outcome.citations,
             pending_action=pending_action,
             clarification=outcome.clarification,

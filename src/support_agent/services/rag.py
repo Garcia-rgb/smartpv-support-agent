@@ -220,7 +220,8 @@ class RAGService:
         return key, Counter(tokenize(key)), Counter(retrieval_terms(key))
 
     async def corpus_index(
-        self, *, corpus_id: str | None = None, include_restricted: bool = False
+        self, *, corpus_id: str | None = None, include_restricted: bool = False,
+        visibility: str | None = None,
     ) -> CorpusIndex:
         """读取权限范围内的片段，切词并统计词频（df）。"""
         rows = (
@@ -235,6 +236,12 @@ class RAGService:
         phrase_df: Counter[str] = Counter()
         for chunk, document in rows:
             metadata = chunk.chunk_metadata or {}
+            # 未标记的历史资料一律视为内部资料，不能因升级而变成可外发内容。
+            is_public = metadata.get("visibility") == "public"
+            if (visibility == "public" and not is_public) or (
+                visibility == "private" and is_public
+            ):
+                continue
             if corpus_id and metadata.get("corpus_id") != corpus_id:
                 continue
             if not include_restricted and metadata.get("restricted") is True:
@@ -275,10 +282,12 @@ class RAGService:
         return reason is not None
 
     async def ingest(
-        self, filename: str, content_type: str, data: bytes
+        self, filename: str, content_type: str, data: bytes, *, visibility: str = "private"
     ) -> tuple[SourceDocument, int, bool]:
         """导入文档；相同内容通过校验和去重，不重复生成文本片段。"""
         digest = checksum(data)
+        if visibility not in {"private", "public"}:
+            raise ValueError("资料级别必须是 private 或 public")
         existing = await self.db.scalar(
             select(SourceDocument).where(SourceDocument.checksum == digest)
         )
@@ -307,6 +316,7 @@ class RAGService:
                     content=piece.text,
                     chunk_metadata={
                         "filename": filename,
+                        "visibility": visibility,
                         "embedding_signature": self.backend.signature,
                     },
                     embedding=vector,
@@ -371,6 +381,7 @@ class RAGService:
                         content=piece.text,
                         chunk_metadata={
                             **metadata,
+                            "visibility": "private",
                             "embedding_signature": self.backend.signature,
                         },
                         embedding=vector,
@@ -398,6 +409,7 @@ class RAGService:
         corpus_id: str | None = None,
         include_restricted: bool = False,
         min_score: float = 0.0,
+        visibility: str | None = None,
     ) -> list[SearchHit]:
         """在指定语料库和权限范围内进行混合检索。
 
@@ -424,16 +436,19 @@ class RAGService:
             top_k,
             corpus_id or "",
             include_restricted,
+            visibility or "all",
             min_score,
             self.backend.signature,
         )
         cached = await self.cache.get(cache_parts)
         if cached is not None:
-            return await self._hits_from_cache(cached, corpus_id, include_restricted)
+            return await self._hits_from_cache(cached, corpus_id, include_restricted, visibility)
 
         query_embedding = (await self.backend.embed_async([key_query]))[0]
         facets = query_facets(key_query)
-        index = await self.corpus_index(corpus_id=corpus_id, include_restricted=include_restricted)
+        index = await self.corpus_index(
+            corpus_id=corpus_id, include_restricted=include_restricted, visibility=visibility
+        )
 
         # 库外判据（见 CORPUS_MISSING_CEILING 与 has_unknown_foreign_token）：
         # 问题用的词基本不在语料里时直接返回空结果，上游会把它当成
@@ -512,6 +527,7 @@ class RAGService:
         entries: list[tuple[int, float]],
         corpus_id: str | None,
         include_restricted: bool,
+        visibility: str | None = None,
     ) -> list[SearchHit]:
         """把缓存的 (片段 id, 分数) 还原成检索结果。
 
@@ -523,6 +539,7 @@ class RAGService:
             entries,
             corpus_id=corpus_id,
             include_restricted=include_restricted,
+            visibility=visibility,
         )
         return [SearchHit(chunk, document, score) for chunk, document, score in rows]
 
