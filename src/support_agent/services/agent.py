@@ -28,8 +28,10 @@ from ..schemas import (
     VersionConflict,
 )
 from .agent_loop import LoopResult, ToolCallRecord, build_support_registry, run_agent_loop
+from .evidence import prepare_evidence_context
 from .industry import describe_facets
 from .input_routing import is_quiz
+from .issue_input import normalize_issue_input
 from .llm import LLMError, OpenAICompatibleClient
 from .local_model import RuleBasedLocalModel
 from .local_summary import summarize_local_retrieval
@@ -38,10 +40,10 @@ from .quiz import QuizResponse, answer_question
 from .rag import RAGService, SearchHit
 from .security import create_confirmation_token, looks_like_prompt_injection
 from .tools import (
-    ARITHMETIC_PATTERN,
     DEVICE_SN_PATTERN,
     TICKET_KEYWORDS,
     has_structured_anchor,
+    is_calculation_request,
 )
 
 INJECTION_ANSWER = "该请求可能试图绕过系统规则，我不能执行。你可以继续咨询公开的业务信息。"
@@ -88,7 +90,7 @@ def _used_business_tool(result: LoopResult) -> bool:
 
 def _local_tool_request(text: str) -> bool:
     """仅让明确的计算、建单或设备状态查询走本地工具流程。"""
-    if ARITHMETIC_PATTERN.search(text) or any(word in text for word in TICKET_KEYWORDS):
+    if is_calculation_request(text) or any(word in text for word in TICKET_KEYWORDS):
         return True
     return bool(
         DEVICE_SN_PATTERN.search(text.upper())
@@ -152,8 +154,11 @@ class SupportAgent:
             else (self.llm if settings.llm_enabled else RuleBasedLocalModel())
         )
 
-    async def _privacy_knowledge_turn(self, text: str) -> TurnOutcome:
+    async def _privacy_knowledge_turn(
+        self, text: str, question: str | None = None,
+    ) -> TurnOutcome:
         """模型调用前确定资料边界；公开调用绝不带历史或内部片段。"""
+        question = question or text
         decision = await classify_question(text, self.rag, self.settings)
         if decision.scope == "public":
             hits = decision.public_hits
@@ -162,7 +167,7 @@ class SupportAgent:
             model = self.llm if self.settings.llm_enabled else self.local_llm
             if model.enabled:
                 try:
-                    answer = await model.answer(text, contexts)
+                    answer = await model.answer(question, contexts)
                 except LLMError:
                     pass
             return TurnOutcome(
@@ -178,7 +183,8 @@ class SupportAgent:
             if self.llm.enabled:
                 try:
                     answer = await self.llm.answer(
-                        text, [hit.chunk.content[:1200] for hit in hits[:2]]
+                        question,
+                        [prepare_evidence_context(hit.chunk.content, 1200) for hit in hits[:2]]
                     )
                 except LLMError:
                     pass
@@ -216,7 +222,13 @@ class SupportAgent:
                 pass
         return TurnOutcome(
             status="failed",
-            answer="资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。",
+            answer=(
+                "资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。"
+                + ("请补充最后采集时间、设备本机读数、采集器在线状态和通信方式；"
+                   "需要该厂家型号的协议或经核实的处理记录。"
+                   if any(term in text for term in ("不刷新", "不更新", "没数据", "无数据"))
+                   else "")
+            ),
             answer_source="policy", privacy_scope="private",
         )
 
@@ -362,8 +374,12 @@ class SupportAgent:
                 blocked=True,
             )
 
+        # History keeps the full input; retrieval and generation use the fault summary.
+        question = normalize_issue_input(text)
+        text = normalize_issue_input(text, include_fields=False)
+
         if self.settings.privacy_routing_enabled and not _local_tool_request(text):
-            return await self._privacy_knowledge_turn(text)
+            return await self._privacy_knowledge_turn(text, question)
 
         # 语料范围判定必须前置。实测模型遇到明显跑题的问题（「Python 怎么装环境」）
         # 根本不会去调检索工具，它直接凭「我是光伏助手」拒答——于是下面那句

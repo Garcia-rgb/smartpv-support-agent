@@ -107,6 +107,21 @@ def find_device_sn(text: str) -> str | None:
 # 误判成算式会让跑题问题也被放行；减法走「减去」这类中文说法即可。
 ARITHMETIC_PATTERN = re.compile(r"\d\s*(?:[+*/×÷]|乘以|除以|加上|减去)\s*\d")
 
+_CALC_INTENT = re.compile(
+    r"(?:计算|算一下|求值|calc)\s*[:：]?\s*(?=[\d(（+-])|"
+    r"\d\s*(?:乘以|除以|加上|减去)\s*\d", re.I
+)
+_PURE_EXPRESSION = re.compile(r"[\d\s.()+*/%×÷-]+")
+
+
+def is_calculation_request(text: str) -> bool:
+    """A parameter substring is not a request to calculate it."""
+    if not ARITHMETIC_PATTERN.search(text):
+        return False
+    stripped = text.strip().rstrip("=？?。")
+    return bool(_CALC_INTENT.search(text) or _PURE_EXPRESSION.fullmatch(stripped))
+
+
 # 写操作意图。这些诉求由 create_ticket 承接，同样不依赖知识库。
 TICKET_KEYWORDS = ("工单", "报修", "派单", "转人工", "投诉")
 
@@ -129,7 +144,7 @@ def has_structured_anchor(text: str) -> bool:
     """
     if DEVICE_SN_PATTERN.search(text.upper()):
         return True
-    if ARITHMETIC_PATTERN.search(text):
+    if is_calculation_request(text):
         return True
     return any(keyword in text for keyword in TICKET_KEYWORDS)
 

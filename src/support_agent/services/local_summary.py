@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from .evidence import has_failed_case, usable_case_text
 from .rag import SearchHit
 
 _MARKUP = re.compile(r"^(?:#{1,6}\s*|[-*]\s*|\d+[.)、]\s*)")
@@ -45,7 +46,7 @@ def _score(line: str, terms: set[str]) -> int:
 def _lines(hits: Sequence[SearchHit]) -> list[str]:
     found: list[str] = []
     for hit in hits[:5]:
-        content = hit.chunk.content.replace("\\n", "\n")
+        content = usable_case_text(hit.chunk.content)
         for raw in content.splitlines():
             line = _plain(raw)
             if len(line) < 8 or _CREDENTIALS.search(line):
@@ -79,7 +80,7 @@ def summarize_explicit_case(question: str, hits: Sequence[SearchHit]) -> str | N
     if len(core) < 6:
         return None
     for hit in hits[:2]:
-        lines = [_plain(raw) for raw in hit.chunk.content.replace("\\n", "\n").splitlines()]
+        lines = [_plain(raw) for raw in usable_case_text(hit.chunk.content).splitlines()]
         for index, line in enumerate(lines):
             if core not in line or _CREDENTIALS.search(line):
                 continue
@@ -111,6 +112,9 @@ def summarize_local_retrieval(question: str, hits: Sequence[SearchHit]) -> str:
     terms = _query_terms(question)
     lines = _lines(hits)
     if not lines:
+        if any(has_failed_case(hit.chunk.content) for hit in hits):
+            return ("命中记录包含未解决或无效尝试，没有可确认的处理办法。"
+                    "请补充设备型号、通信链路和当前状态，并核对引用。")
         return "找到相关资料，但没有可安全摘录的文字。请查看下方引用。"
 
     conclusion = _alarm_conclusion(lines, terms)

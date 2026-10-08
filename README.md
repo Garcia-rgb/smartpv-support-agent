@@ -1,13 +1,13 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.10.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.10.3-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 面向光伏服务人员的技术支持工具，集中处理 **现场问题排查、课程刷题讲解和点表制作**。
 支持文字输入、上传或粘贴截图，并提供 admin / user 账号、资料管理和本机备份。
 
-当前版本 **v1.10.1**，适合在 Windows 本机试用和逐步补充业务资料。企业运行框架已搭建，回答质量与协议解析仍需结合实际资料和现场结果验收。
+当前版本 **v1.10.3**，适合在 Windows 本机试用和逐步补充业务资料。企业运行框架已搭建，回答质量与协议解析仍需结合实际资料和现场结果验收。
 
 ## 主要功能
 
@@ -27,6 +27,8 @@
 - 有明确题目和选项结构的内容进入刷题讲解。
 - 客户聊天、告警和现场描述进入技术问答。
 - 识别文字可核对、修改后重新提交。
+- 现场截图会先提取故障描述和型号再检索，界面文字及铭牌规格作为辅助信息；原始输入保留。
+- 工作记录中的无效尝试和未解决案例不作为已验证的处理办法，仍需核对资料适用性。
 
 当前图片处理以文字识别为主，不能凭纯设备照片判断故障。分类和识别可能出错，需要核对识别结果。
 

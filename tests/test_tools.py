@@ -52,3 +52,31 @@ def test_structured_anchor_is_detected(text: str) -> None:
 )
 def test_plain_questions_have_no_structured_anchor(text: str) -> None:
     assert has_structured_anchor(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "最大直流工作电流44/44/44/44A，数据不刷新",
+    "直流短路电流55/55/55/55A",
+    "额定输出电压3/N/PE or 3/PE~380V",
+    "2025/09/16的告警记录",
+    "设备型号GW80K-MT，编号350-00396-01",
+])
+def test_nameplate_numbers_do_not_trigger_calculation(text):
+    from support_agent.services.agent import _local_tool_request
+    from support_agent.services.tools import is_calculation_request
+
+    assert not is_calculation_request(text)
+    assert not has_structured_anchor(text)
+    assert not _local_tool_request(text)
+
+
+@pytest.mark.parametrize("text", [
+    "计算 (12+8)/4", "calc: 100/2", "100 乘以 0.986 等于多少", "12+8",
+])
+def test_explicit_calculation_still_has_a_tool_route(text):
+    from support_agent.services.agent import _local_tool_request
+    from support_agent.services.tools import is_calculation_request
+
+    assert is_calculation_request(text)
+    assert has_structured_anchor(text)
+    assert _local_tool_request(text)
