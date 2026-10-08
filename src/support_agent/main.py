@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import os
 import re
 import secrets
@@ -32,15 +31,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import __version__
 from .admin_routes import router as admin_router
 from .config import Settings, get_settings, validate_runtime_settings
+from .data_routes import router as data_router
 from .db import create_schema, get_db
 from .models import (
     AuditLog,
-    ConsumedConfirmationToken,
     Conversation,
     Feedback,
     LoginSession,
     Message,
-    Ticket,
+    MessageImage,
     UserAccount,
 )
 from .observability import configure_file_logging, request_observability
@@ -54,18 +53,21 @@ from .schemas import (
     LoginRequest,
     ManagedUser,
     ManagedUserList,
+    MessageImageView,
+    MessageView,
     PasswordChangeRequest,
     PointTableGenerateRequest,
     QuizResponse,
     SessionListResponse,
     SessionResponse,
+    SessionSummary,
     TicketCreateRequest,
-    TicketResponse,
     UnifiedInputResponse,
     UserCreateRequest,
     UserCredentialResponse,
     UserStatusRequest,
 )
+from .service_routes import router as service_router
 from .services.agent import SupportAgent
 from .services.auth import (
     COOKIE_NAME,
@@ -81,13 +83,13 @@ from .services.backups import archive_source
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
 from .services.input_routing import is_quiz
+from .services.issue_input import prepare_screenshot_question
 from .services.llm import OpenAICompatibleClient
 from .services.pointtable import MAX_BYTES as MAX_PROTOCOL_BYTES
-from .services.pointtable import PointTableError, generate_csv, parse_protocol
+from .services.pointtable import PointTableError, generate_csv, parse_protocol, validate_points
 from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
-from .services.security import verify_confirmation_token
 from .services.semantic import EmbeddingUnavailableError
 
 
@@ -134,6 +136,14 @@ app = FastAPI(
 )
 app.middleware("http")(request_observability)
 app.include_router(admin_router)
+app.include_router(service_router)
+app.include_router(data_router)
+
+
+@app.post("/point-tables/validate")
+async def validate_point_table(request: PointTableGenerateRequest,
+                               user: Annotated[UserAccount | None, Depends(current_user)]) -> dict:
+    return validate_points(request.direction, request.fields, request.points)
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -523,6 +533,7 @@ async def unified_input(
     response: Response,
     user: AuthenticatedUser,
     file: OptionalQuizUpload = None,
+    files: Annotated[list[UploadFile] | None, File()] = None,
     message: Annotated[str | None, Form()] = None,
     session_id: Annotated[str | None, Form()] = None,
 ) -> UnifiedInputResponse:
@@ -533,25 +544,42 @@ async def unified_input(
         raise HTTPException(404, "会话不存在")
     prompt = (message or "").strip()
     recognized = None
-    if file:
-        if file.content_type not in {"image/png", "image/jpeg", "image/webp"}:
-            raise HTTPException(400, "请上传 PNG、JPG 或 WebP 图片")
-        data = await file.read(settings.max_upload_bytes + 1)
-        if len(data) > settings.max_upload_bytes:
-            raise HTTPException(413, "图片超过大小限制")
-        try:
-            recognized = (await run_in_threadpool(recognize_image, data)).strip()
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if not recognized:
-            raise HTTPException(400, "图片中未识别到文字，请换清晰截图或直接输入问题")
+    image_data = []
+    uploads = ([file] if file else []) + (files or [])
+    image_texts = []
+    if uploads:
+        if len(uploads) > 6:
+            raise HTTPException(400, "一次最多发送6张图片")
+        total_bytes = 0
+        # Check the entire batch before running OCR or invoking any model.
+        image_data = []
+        for upload in uploads:
+            if upload.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+                raise HTTPException(400, "请上传 PNG、JPG 或 WebP 图片")
+            data = await upload.read(settings.max_upload_bytes + 1)
+            total_bytes += len(data)
+            if len(data) > settings.max_upload_bytes or total_bytes > 20 * 1024 * 1024:
+                raise HTTPException(413, "单张图片超过限制或图片合计超过20MB")
+            image_data.append(data)
+        for index, data in enumerate(image_data, 1):
+            try:
+                text = (await run_in_threadpool(recognize_image, data)).strip()
+            except (ValueError, RuntimeError) as exc:
+                raise HTTPException(400, f"第{index}张图片：{exc}") from exc
+            if not text:
+                raise HTTPException(400, f"第{index}张图片未识别到文字，请换清晰截图")
+            if len(text) > 4000:
+                raise HTTPException(400, f"第{index}张识别文字过长，请裁剪图片")
+            image_texts.append(text)
+        recognized = image_texts[0] if len(image_texts) == 1 else "\n\n".join(
+            f"【图片{index}】\n{text}" for index, text in enumerate(image_texts, 1))
     elif not prompt:
         raise HTTPException(400, "请输入问题或上传图片")
     raw = recognized or prompt
-    if len(raw) > 4000:
+    if not uploads and len(raw) > 4000:
         raise HTTPException(400, "识别文字过长，请裁剪图片或精简问题")
     issue_hint = any(word in prompt for word in ("客户", "现场", "告警", "报错", "排查", "故障"))
-    if is_quiz(raw) and not issue_hint:
+    if len(uploads) <= 1 and is_quiz(raw) and not issue_hint:
         identity = user.id if user else "demo-user"
         decision = await get_rate_limiter(settings).check(identity)
         if not decision.allowed:
@@ -560,15 +588,38 @@ async def unified_input(
         response.headers.update(decision.headers)
         result = await analyze_quiz(db, settings, user, recognized_text=raw)
         saved = await SupportAgent(db, settings).save_quiz(raw, result, session_id, identity)
+        await save_input_images(db, saved.user_message_id, uploads, image_data)
         result.session_id = saved.session_id
         result.message_id = saved.message_id
         return UnifiedInputResponse(kind="quiz", recognized_text=recognized, quiz=result)
-    combined = f"{prompt}\n{recognized}" if prompt and recognized else raw
+    if recognized:
+        try:
+            prepared_texts = [prepare_screenshot_question(text) for text in image_texts]
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        prepared = prepared_texts[0] if len(prepared_texts) == 1 else (
+            "多图资料联合分析：请结合全部图片与用户描述回答。\n" + "\n\n".join(
+                f"【图片{index}】\n{text}" for index, text in enumerate(prepared_texts, 1)))
+        combined = f"{prompt}\n{prepared}" if prompt else prepared
+    else:
+        combined = raw
     if len(combined) > 4000:
         raise HTTPException(400, "识别文字过长，请裁剪图片或精简问题")
     result = await chat(ChatRequest(message=combined, session_id=session_id),
                         db, settings, response, user)
+    if uploads:
+        await save_input_images(db, result.user_message_id, uploads, image_data)
     return UnifiedInputResponse(kind="chat", recognized_text=recognized, chat=result)
+
+
+async def save_input_images(db: AsyncSession, message_id: str | None,
+                            uploads: list[UploadFile], image_data: list[bytes]) -> None:
+    if not message_id or not uploads:
+        return
+    for position, (upload, data) in enumerate(zip(uploads, image_data, strict=True)):
+        db.add(MessageImage(message_id=message_id, position=position,
+                            content_type=upload.content_type, data=data))
+    await db.commit()
 
 
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
@@ -591,9 +642,12 @@ async def list_sessions(
         select(func.count()).select_from(Conversation).where(*owner_filter)
     )
 
+    title = select(Message.content).where(
+        Message.session_id == Conversation.id, Message.role == "user"
+    ).order_by(Message.created_at, Message.id).limit(1).correlate(Conversation).scalar_subquery()
     conversations = (
-        await db.scalars(
-            select(Conversation)
+        await db.execute(
+            select(Conversation, title)
             .where(*owner_filter)
             .order_by(
                 Conversation.created_at.desc(),
@@ -605,7 +659,10 @@ async def list_sessions(
     ).all()
 
     return SessionListResponse(
-        items=conversations,
+        items=[SessionSummary(id=conversation.id, user_id=conversation.user_id,
+                              created_at=conversation.created_at,
+                              title=(text or "新对话").replace("\n", " ")[:72])
+               for conversation, text in conversations],
         total=total or 0,
         limit=limit,
         offset=offset,
@@ -634,12 +691,37 @@ async def get_session(
             select(Message).where(Message.session_id == session_id).order_by(Message.created_at)
         )
     ).all()
+    images = {}
+    if messages:
+        rows = (await db.execute(select(MessageImage.id, MessageImage.message_id,
+                                       MessageImage.content_type).where(
+            MessageImage.message_id.in_([message.id for message in messages])
+        ).order_by(MessageImage.position))).all()
+        for image_id, message_id, content_type in rows:
+            images.setdefault(message_id, []).append(
+                MessageImageView(id=image_id, content_type=content_type))
     return SessionResponse(
         id=conversation.id,
         user_id=conversation.user_id,
         created_at=conversation.created_at,
-        messages=messages,
+        messages=[MessageView.model_validate(message).model_copy(
+            update={"images": images.get(message.id, [])}) for message in messages],
     )
+
+
+@app.get("/message-images/{image_id}")
+async def get_message_image(image_id: str, db: DbDep, user: AuthenticatedUser,
+                            x_user_id: UserHeader = "demo-user") -> Response:
+    filters = [] if user and user.role == "admin" else [
+        Conversation.user_id == (user.id if user else x_user_id)]
+    image = await db.scalar(select(MessageImage).join(
+        Message, MessageImage.message_id == Message.id).join(
+        Conversation, Message.session_id == Conversation.id).where(
+        MessageImage.id == image_id, *filters))
+    if not image:
+        raise HTTPException(404, "图片不存在")
+    return Response(image.data, media_type=image.content_type, headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/feedback", status_code=status.HTTP_201_CREATED)
@@ -660,57 +742,9 @@ async def create_feedback(
     return {"id": feedback.id}
 
 
-@app.post("/tickets", response_model=TicketResponse, status_code=status.HTTP_201_CREATED)
-async def create_ticket(
-    request: TicketCreateRequest,
-    db: DbDep,
-    settings: SettingsDep,
-    user: AuthenticatedUser,
-) -> TicketResponse:
-    try:
-        payload = verify_confirmation_token(
-            request.confirmation_token, settings.confirmation_secret
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    user_id = user.id if user else request.user_id
-    if payload.get("action") != "create_ticket" or payload.get("user_id") != user_id:
-        raise HTTPException(403, "确认令牌与当前操作或用户不匹配")
-    if user and user.role != "admin":
-        conversation = await db.get(Conversation, payload.get("session_id"))
-        if not conversation or conversation.user_id != user.id:
-            raise HTTPException(403, "无权操作该会话")
-    token_hash = hashlib.sha256(request.confirmation_token.encode()).hexdigest()
-    # 先占位、再建单：把「这个令牌用过没有」变成一次主键冲突判定。
-    # 只存哈希不存原文——令牌本身就是凭证，落库等于多留一份可用的口令。
-    consumed = ConsumedConfirmationToken(token_hash=token_hash, user_id=user_id)
-    db.add(consumed)
-    try:
-        await db.flush()
-    except IntegrityError as exc:
-        # 唯一约束替我们完成了原子判定：并发下第二个请求必然撞在这里。
-        await db.rollback()
-        raise HTTPException(409, "确认令牌已经使用") from exc
-
-    ticket = Ticket(
-        session_id=payload["session_id"],
-        device_sn=payload.get("device_sn"),
-        reason=payload["reason"],
-    )
-    db.add(ticket)
-    await db.flush()
-    consumed.ticket_id = ticket.id
-    db.add(
-        AuditLog(
-            actor=user_id,
-            action="confirmation_consumed",
-            resource=token_hash,
-            detail={"ticket_id": ticket.id},
-        )
-    )
-    await db.commit()
-    await db.refresh(ticket)
-    return ticket
+@app.post("/tickets", include_in_schema=False)
+async def retired_ticket(request: TicketCreateRequest, user: AuthenticatedUser) -> None:
+    raise HTTPException(410, "工单功能已取消，请使用现有企业App处理工单")
 
 
 @app.post("/evaluations/run", response_model=EvaluationResponse)

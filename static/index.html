@@ -255,12 +255,27 @@
   .ops-stat strong { display: block; font-size: 24px; color: var(--brand); }
   .ops-pager { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
 
-  @media (max-width: 860px) { .sidebar { display: none; } }
+  .history-toggle { display:none; }
+  @media (max-width: 1100px) { .topbar { flex-wrap:wrap;height:auto;min-height:58px;padding:8px 12px; } }
+  @media (max-width: 860px) {
+    .sidebar { width:220px;flex-basis:220px; }
+  }
+  @media (max-width: 600px) {
+    .history-toggle { display:inline-block; }
+    .sidebar { display:none; }
+    .app.history-open .sidebar { display:flex;position:absolute;inset:0 auto 0 0;z-index:60;width:260px;box-shadow:var(--shadow); }
+    .app.history-open .history-toggle { position:relative;z-index:61; }
+  }
   @media (max-width: 480px) {
     .user-create { flex-direction: column; align-items: stretch; }
     .user-create button.primary { width: 100%; }
     .pointtable-fields { grid-template-columns: 1fr; }
   }
+  .image-draft-cards { display:flex; gap:8px; flex-wrap:wrap; max-height:160px; overflow:auto; margin:6px 0; }
+  .image-draft-card { width:96px; flex:0 0 96px; }
+  .image-draft-card img { display:block; width:96px; height:68px; object-fit:contain; border:1px solid var(--line); border-radius:6px; }
+  .image-draft-card button { padding:3px 8px; width:100%; font-size:12px; }
+  .image-draft-cards .quiz-thumb { width:130px; max-height:150px; object-fit:contain; margin:0; }
 </style>
 </head>
 <body>
@@ -341,6 +356,7 @@
 
   <main class="main">
     <div class="topbar">
+      <button class="ghost history-toggle" id="historyToggle" type="button" aria-expanded="false">历史对话</button>
       <span class="title">技术支持助手</span>
       <span class="badge" id="modeBadge">…</span>
       <span class="spacer"></span>
@@ -359,11 +375,12 @@
       <div class="chips" id="chips"></div>
       <div class="workflow-panel" id="workflowPanel" hidden></div>
       <div class="composer-inner">
+        <div id="imageDrafts" hidden aria-live="polite"></div>
         <textarea id="input" rows="1" placeholder="描述现场问题或粘贴学习题目（Enter 发送，Shift+Enter 换行）"></textarea>
         <div class="composer-foot">
           <span class="hint" id="hint">已连接本地服务</span>
           <button class="ghost" id="quizBtn" type="button">📷 上传图片</button>
-          <input type="file" id="quizInput" hidden accept="image/png,image/jpeg,image/webp">
+          <input type="file" id="quizInput" hidden multiple accept="image/png,image/jpeg,image/webp">
           <button class="primary" id="sendBtn">发送</button>
         </div>
       </div>
@@ -372,15 +389,9 @@
 </div>
 
 <script>
-const state = { sessionId: null, userId: null, csrfToken: null, busy: false };
+const state = { sessionId: null, userId: null, csrfToken: null, busy: false, pendingImages: [] };
 
 const WORKFLOWS = {
-  ticket: {
-    label: '工单流程',
-    title: '创建故障工单',
-    description: '请写明设备编号和故障现象。发送后会先展示确认信息，确认后才创建工单。',
-    placeholder: '例如：设备 SN-2024-000789 报故障停机，请创建工单',
-  },
   pointTable: {
     label: '点表制作',
     title: '点表制作',
@@ -423,6 +434,9 @@ async function api(path, options) {
 }
 
 function showLogin() {
+  clearImageDrafts();
+  document.querySelectorAll('.service-screen').forEach(screen => screen.remove());
+  state.role = null;
   state.userId = null;
   state.csrfToken = null;
   state.sessionId = null;
@@ -434,7 +448,8 @@ function showLogin() {
   $('loginPassword').value = '';
 }
 
-function showApp(user) {
+async function showApp(user) {
+  state.role = user.role;
   state.userId = user.user_id;
   state.csrfToken = user.csrf_token;
   $('userBadge').textContent = user.username + ' · ' + user.role;
@@ -447,7 +462,7 @@ function showApp(user) {
   $('usersScreen').hidden = true;
   $('opsScreen').hidden = true;
   $('appRoot').hidden = false;
-  loadSessions();
+  await restoreLastConversation();
   input.focus();
 }
 
@@ -567,10 +582,20 @@ $('userCreateForm').onsubmit = async function (event) {
 };
 
 /* ---------- 消息渲染 ---------- */
-function addUser(text) {
+function addUser(text, images = []) {
   const el = document.createElement('div');
   el.className = 'msg user';
   el.innerHTML = '<div class="avatar">我</div><div class="bubble">' + fmt(text) + '</div>';
+  if (images.length) {
+    const pictures = document.createElement('div'); pictures.className = 'image-draft-cards';
+    images.forEach((image, index) => {
+      const img = document.createElement('img'); img.className = 'quiz-thumb';
+      img.src = '/message-images/' + encodeURIComponent(image.id);
+      img.alt = '历史图片' + (index + 1); img.loading = 'lazy';
+      pictures.appendChild(img);
+    });
+    el.querySelector('.bubble').appendChild(pictures);
+  }
   wrap.appendChild(el);
   scroll();
 }
@@ -646,7 +671,7 @@ function addBot(payload) {
 
 function addQuizResult(payload) {
   if (payload.session_id) {
-    state.sessionId = payload.session_id;
+    rememberSession(payload.session_id);
     loadSessions();
   }
   const el = document.createElement('div');
@@ -674,7 +699,7 @@ function addQuizResult(payload) {
       const updated = await api('/input', { method: 'POST', body: fd });
       if (updated.kind === 'quiz') addQuizResult(updated.quiz);
       else {
-        state.sessionId = updated.chat.session_id;
+        rememberSession(updated.chat.session_id);
         addBot(updated.chat);
         loadSessions();
       }
@@ -747,43 +772,8 @@ function conflictBlock(conflicts) {
 
 function pendingBlock(action) {
   const box = document.createElement('div');
-  box.className = 'pending';
-  box.innerHTML = '<div class="s">' + esc(action.summary) + '</div>';
-  const row = document.createElement('div');
-  row.className = 'row';
-  const ok = document.createElement('button');
-  ok.className = 'primary';
-  ok.style.marginLeft = '0';
-  ok.textContent = '确认创建工单';
-  const cancel = document.createElement('button');
-  cancel.className = 'ghost';
-  cancel.textContent = '取消';
-  const note = document.createElement('span');
-  note.className = 'hint';
-  note.textContent = '写操作需要二次确认，令牌一次性有效';
-  row.append(ok, cancel, note);
-  box.appendChild(row);
-
-  ok.onclick = async function () {
-    ok.disabled = true; cancel.disabled = true;
-    try {
-      const ticket = await api('/tickets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirmation_token: action.confirmation_token }),
-      });
-      box.innerHTML = '<div class="ok">工单已创建 · 编号 ' + esc(ticket.id.slice(0, 8)) +
-        (ticket.device_sn ? ' · 设备 ' + esc(ticket.device_sn) : '') +
-        ' · 状态 ' + esc(ticket.status) + '</div>';
-    } catch (e) {
-      ok.disabled = false; cancel.disabled = false;
-      note.textContent = '创建失败：' + e.message;
-      note.className = 'err';
-    }
-  };
-  cancel.onclick = function () {
-    box.innerHTML = '<div class="hint">已取消，没有产生任何写入。</div>';
-  };
+  box.className = 'hint';
+  box.textContent = '工单功能已取消，请使用现有企业App处理。';
   return box;
 }
 
@@ -840,83 +830,94 @@ function addRecognitionEdit(target, recognized) {
   target.querySelector('.bubble').appendChild(edit);
 }
 
+const MAX_PENDING_IMAGES = 6;
+function renderImageDrafts() {
+  const box = $('imageDrafts');
+  box.hidden = !state.pendingImages.length;
+  box.innerHTML = '';
+  const note = document.createElement('div');
+  note.className = 'hint';
+  note.textContent = '已添加 ' + state.pendingImages.length + ' 张图片，点击发送后统一分析（最多6张）';
+  box.appendChild(note);
+  const cards = document.createElement('div'); cards.className = 'image-draft-cards';
+  state.pendingImages.forEach((item, index) => {
+    const card = document.createElement('div'); card.className = 'image-draft-card';
+    const img = document.createElement('img'); img.src = item.url; img.alt = '待发送图片' + (index + 1);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'ghost';
+    remove.textContent = '移除 ' + (index + 1); remove.disabled = state.busy;
+    remove.onclick = () => {
+      if (state.busy) return;
+      URL.revokeObjectURL(item.url); state.pendingImages.splice(index, 1); renderImageDrafts();
+    };
+    card.append(img, remove); cards.appendChild(card);
+  });
+  box.appendChild(cards);
+}
+function clearImageDrafts() {
+  state.pendingImages.forEach(item => URL.revokeObjectURL(item.url));
+  state.pendingImages = []; renderImageDrafts();
+}
+function queueImages(files) {
+  if (state.busy) { $('hint').textContent = '正在处理，请等待完成后再添加图片'; return; }
+  let note = '';
+  for (const file of files) {
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      note = '请使用 PNG、JPG 或 WebP 图片'; continue;
+    }
+    if (state.pendingImages.length >= MAX_PENDING_IMAGES) { note = '一次最多添加6张图片'; break; }
+    if (file.size > 10 * 1024 * 1024 || state.pendingImages.reduce((n,item)=>n+item.file.size,0)+file.size > 20*1024*1024) {
+      note = '单张图片最多10MB，合计最多20MB'; continue;
+    }
+    state.pendingImages.push({file, url: URL.createObjectURL(file)});
+  }
+  renderImageDrafts();
+  $('hint').textContent = note || '图片已暂存，可以继续添加图片或文字，点击发送后提交';
+  input.focus();
+}
 async function send(text) {
-  text = (text !== undefined ? text : input.value).trim();
-  if (!text || state.busy) return;
-  state.busy = true;
-  $('sendBtn').disabled = true;
+  const explicitText = text !== undefined;
+  const caption = (explicitText ? text : input.value).trim();
+  const images = explicitText ? [] : [...state.pendingImages];
+  if ((!caption && !images.length) || state.busy) return;
+  state.busy = true; $('sendBtn').disabled = true; $('quizBtn').disabled = true;
+  input.disabled = true; $('newBtn').disabled = true; renderImageDrafts();
   if (wrap.querySelector('.empty')) wrap.innerHTML = '';
-  addUser(text);
-  input.value = '';
-  autoGrow();
+  let preview;
+  if (images.length) {
+    preview = document.createElement('div'); preview.className = 'msg user';
+    preview.innerHTML = '<div class="avatar">我</div><div class="bubble">' + images.length + ' 张图片' +
+      (caption ? '<div>' + esc(caption) + '</div>' : '') + '<div class="image-draft-cards"></div></div>';
+    images.forEach((item,index) => {
+      const img=document.createElement('img'); img.className='quiz-thumb'; img.alt='图片'+(index+1);
+      const url=URL.createObjectURL(item.file); img.src=url;
+      img.onload=img.onerror=()=>URL.revokeObjectURL(url);
+      preview.querySelector('.image-draft-cards').appendChild(img);
+    });
+    wrap.appendChild(preview);
+  } else addUser(caption);
   addTyping();
   try {
     const body = new FormData();
-    body.append('message', text);
+    if (caption) body.append('message', caption);
+    images.forEach(item => body.append('files', item.file));
     if (state.sessionId) body.append('session_id', state.sessionId);
     const result = await api('/input', { method: 'POST', body });
     clearTyping();
+    if (!explicitText) { input.value = ''; clearImageDrafts(); autoGrow(); }
     if (result.kind === 'quiz') addQuizResult(result.quiz);
     else {
-      state.sessionId = result.chat.session_id;
-      addBot(result.chat);
+      rememberSession(result.chat.session_id);
+      const answer = addBot(result.chat);
+      if (images.length) addRecognitionEdit(answer, result.recognized_text);
       loadSessions();
     }
+    $('hint').textContent = '已发送';
   } catch (e) {
     clearTyping();
-    const el = document.createElement('div');
-    el.className = 'msg bot';
-    el.innerHTML = '<div class="avatar">AI</div><div class="bubble"><span class="err">出错：' + esc(e.message) + '</span></div>';
-    wrap.appendChild(el);
+    addBot({ status: 'failed', answer: '发送失败：' + e.message + '。图片和文字已保留，可修改后重试。' });
   } finally {
-    state.busy = false;
-    $('sendBtn').disabled = false;
-    input.focus();
-  }
-}
-
-async function sendImage(file) {
-  if (!file || state.busy) return;
-  if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-    alert('请使用 PNG、JPG 或 WebP 图片'); return;
-  }
-  state.busy = true;
-  $('sendBtn').disabled = true;
-  $('quizBtn').disabled = true;
-  const caption = input.value.trim();
-  input.value = '';
-  autoGrow();
-  if (wrap.querySelector('.empty')) wrap.innerHTML = '';
-  const preview = document.createElement('div');
-  preview.className = 'msg user';
-  const url = URL.createObjectURL(file);
-  preview.innerHTML = '<div class="avatar">我</div><div class="bubble">图片' +
-    (caption ? '<div>' + esc(caption) + '</div>' : '') +
-    '<img class="quiz-thumb" alt="上传的截图"></div>';
-  preview.querySelector('img').src = url;
-  preview.querySelector('img').onload = () => URL.revokeObjectURL(url);
-  wrap.appendChild(preview);
-  addTyping();
-  try {
-    const fd = new FormData();
-    fd.append('file', file);
-    if (caption) fd.append('message', caption);
-    if (state.sessionId) fd.append('session_id', state.sessionId);
-    const result = await api('/input', { method: 'POST', body: fd });
-    clearTyping();
-    if (result.kind === 'quiz') addQuizResult(result.quiz);
-    else {
-      state.sessionId = result.chat.session_id;
-      addRecognitionEdit(addBot(result.chat), result.recognized_text);
-      loadSessions();
-    }
-  } catch (e) {
-    clearTyping();
-    addBot({ status: 'failed', answer: '图片处理失败：' + e.message });
-  } finally {
-    state.busy = false;
-    $('sendBtn').disabled = false;
-    $('quizBtn').disabled = false;
+    state.busy = false; $('sendBtn').disabled = false; $('quizBtn').disabled = false;
+    input.disabled = false; $('newBtn').disabled = false; renderImageDrafts(); input.focus();
   }
 }
 
@@ -925,37 +926,80 @@ function autoGrow() {
   input.style.height = Math.min(input.scrollHeight, 168) + 'px';
 }
 
-async function loadSessions() {
-  try {
-    const data = await api('/sessions?limit=20');
-    const box = $('sessionList');
-    if (!data.items.length) {
-      box.innerHTML = '<div class="hint" style="padding:4px 2px">暂无会话</div>';
-      return;
-    }
-    box.innerHTML = '';
-    data.items.forEach(function (s) {
-      const d = document.createElement('div');
-      d.className = 'session' + (s.id === state.sessionId ? ' active' : '');
-      d.innerHTML = esc(s.id.slice(0, 8)) + '<small>' + new Date(s.created_at).toLocaleString('zh-CN') + '</small>';
-      d.onclick = function () { openSession(s.id); };
-      box.appendChild(d);
-    });
-  } catch (e) { /* 侧栏失败不影响主流程 */ }
+function lastSessionKey() { return 'smartpv:last-session:' + state.userId; }
+function rememberSession(id) {
+  state.sessionId = id;
+  if (!state.userId) return;
+  try { localStorage.setItem(lastSessionKey(), id || ''); } catch (error) {}
 }
-
-async function openSession(id) {
-  if (state.busy) return;
+async function restoreLastConversation() {
+  const owner = state.userId;
+  const items = await loadSessions();
+  if (owner !== state.userId) return;
+  let saved = null;
+  try { saved = localStorage.getItem(lastSessionKey()); } catch (error) {}
+  // An explicit new conversation stays empty across a reload.
+  if (saved === '') { showEmpty(); return; }
+  if (saved && await openSession(saved, true)) return;
+  if (owner !== state.userId) return;
+  const latest = (items || []).find(item => item.user_id === owner);
+  if (latest) await openSession(latest.id, true);
+  else showEmpty();
+}
+async function loadSessions(offset = 0) {
+  const owner = state.userId;
   try {
-    const s = await api('/sessions/' + id);
-    state.sessionId = id;
-    wrap.innerHTML = '';
-    s.messages.forEach(function (m) {
-      if (m.role === 'user') addUser(m.content);
-      else addBot({ answer: m.content, citations: m.citations || [], message_id: m.id });
+    const data = await api('/sessions?limit=20&offset=' + offset);
+    if (owner !== state.userId) return null;
+    const box = $('sessionList');
+    if (!offset) box.innerHTML = '';
+    const oldMore = $('historyMore'); if (oldMore) oldMore.remove();
+    if (!data.items.length && !offset) {
+      box.innerHTML = '<div class="hint" style="padding:4px 2px">暂无会话</div>';
+      return [];
+    }
+    data.items.forEach(function (session) {
+      const row = document.createElement('div');
+      row.className = 'session' + (session.id === state.sessionId ? ' active' : '');
+      row.title = session.title || session.id;
+      row.innerHTML = esc(session.title || session.id.slice(0, 8)) + '<small>' + new Date(session.created_at).toLocaleString('zh-CN') + '</small>';
+      row.onclick = function () { openSession(session.id); closeHistorySidebar(); };
+      box.appendChild(row);
     });
-    loadSessions();
-  } catch (e) { alert('打开会话失败：' + e.message); }
+    if (offset + data.items.length < data.total) {
+      const more = document.createElement('button'); more.id = 'historyMore'; more.className = 'ghost';
+      more.textContent = '加载更早的对话';
+      more.onclick = async () => {
+        more.disabled = true;
+        await loadSessions(offset + data.items.length);
+        more.disabled = false;
+      };
+      box.appendChild(more);
+    }
+    return data.items;
+  } catch (error) {
+    $('hint').textContent = '历史记录暂时加载失败，请刷新重试；数据库中的记录仍保留。';
+    return null;
+  }
+}
+async function openSession(id, quiet = false) {
+  if (state.busy) return false;
+  const owner = state.userId;
+  try {
+    const session = await api('/sessions/' + id);
+    if (owner !== state.userId) return false;
+    clearImageDrafts(); rememberSession(id);
+    wrap.innerHTML = '';
+    session.messages.forEach(function (message) {
+      if (message.role === 'user') addUser(message.content, message.images || []);
+      else addBot({ answer: message.content, citations: message.citations || [], message_id: message.id });
+    });
+    await loadSessions();
+    return true;
+  } catch (error) {
+    if (!quiet) $('hint').textContent = '打开会话失败：' + error.message;
+    return false;
+  }
 }
 
 async function checkHealth() {
@@ -979,25 +1023,36 @@ async function checkHealth() {
 }
 
 /* ---------- 事件绑定 ---------- */
-$('sendBtn').onclick = function () { send(); };
+$('sendBtn').onclick = function () { return send(); };
 $('quizBtn').onclick = function () { $('quizInput').click(); };
 $('quizInput').onchange = function (e) {
-  sendImage(e.target.files[0]);
+  queueImages(Array.from(e.target.files || []));
   e.target.value = '';
 };
 input.addEventListener('paste', function (e) {
-  const image = Array.from(e.clipboardData?.files || []).find((f) => f.type.startsWith('image/'));
-  if (image) { e.preventDefault(); sendImage(image); }
+  const images = Array.from(e.clipboardData?.files || []).filter(f => f.type.startsWith('image/'));
+  if (images.length) { e.preventDefault(); queueImages(images); }
 });
 input.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 input.addEventListener('input', autoGrow);
 $('newBtn').onclick = function () {
-  state.sessionId = null;
+  if (state.busy) return;
+  clearImageDrafts();
+  rememberSession(null);
   showEmpty();
   loadSessions();
   input.focus();
+  closeHistorySidebar();
+};
+function closeHistorySidebar() {
+  $('appRoot').classList.remove('history-open');
+  $('historyToggle').setAttribute('aria-expanded', 'false');
+}
+$('historyToggle').onclick = function () {
+  const opened = $('appRoot').classList.toggle('history-open');
+  $('historyToggle').setAttribute('aria-expanded', String(opened));
 };
 $('uploadBtn').onclick = function () { $('fileInput').click(); };
 $('fileInput').onchange = async function (e) {
@@ -1036,7 +1091,9 @@ async function showPointTableForm() {
     '<div id="ptWarnings" class="pointtable-note"></div>' +
     '<div class="pointtable-scroll"><table><thead id="ptHead"></thead><tbody id="ptRows"></tbody></table></div>' +
     '<div class="pointtable-actions"><button class="ghost" id="ptAddRow" type="button">添加点位</button>' +
-    '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div></div></div>';
+    '<button class="ghost" id="ptValidate" type="button">检查点表</button>' +
+    '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div>' +
+    '<div id="ptValidation" class="pointtable-note" role="status"></div></div></div>';
   workflowPanel.querySelector('.close').onclick = closeWorkflow;
   let parsed = null;
   const fieldNames = {
@@ -1151,19 +1208,42 @@ async function showPointTableForm() {
       register_type: '', access: '', data_type: '', count: '1', gain: '1', unit: '' });
     renderPoints();
   };
-  $('ptGenerate').onclick = async function () {
+  function pointPayload() {
     const fields = {};
     $('ptFields').querySelectorAll('input').forEach((control) => {
       fields[control.name] = control.value.trim();
     });
     const points = readPoints();
+    return { direction: parsed.direction, fields, points };
+  }
+  async function checkPoints(payload) {
+    const result = await api('/point-tables/validate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    $('ptValidation').textContent = (result.valid ? '未发现阻止生成的错误。' : '请先修改以下错误：') + '\n' +
+      result.errors.map(item => '第' + item.row + '行：' + item.message).join('\n') + '\n' +
+      result.warnings.map(item => (item.row ? '第' + item.row + '行：' : '') + item.message).join('\n');
+    $('ptValidation').style.whiteSpace = 'pre-wrap';
+    return result;
+  }
+  $('ptValidate').onclick = async function () {
+    $('ptValidate').disabled = true;
+    try { await checkPoints(pointPayload()); }
+    catch (error) { $('ptError').textContent = error.message; }
+    finally { $('ptValidate').disabled = false; }
+  };
+  $('ptGenerate').onclick = async function () {
+    const payload = pointPayload();
     $('ptError').textContent = '';
     $('ptGenerate').disabled = true;
     try {
+      const validation = await checkPoints(payload);
+      if (!validation.valid) throw new Error('点表检查未通过，请按具体行号修改后重试');
+      if (!window.confirm('请确认已经核对地址基数、字序、倍率和单位。CSV仅供人工确认后使用，是否继续下载？')) return;
       const res = await fetch('/point-tables/generate', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
-        body: JSON.stringify({ direction: parsed.direction, fields, points }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const error = await res.json();
@@ -1243,7 +1323,7 @@ async function loadOps() {
     const box = $('opsContent'); box.innerHTML = '';
     if (ops.tab === 'overview') {
       const labels = { documents: '资料', chunks: '资料片段', users: '账号', conversations: '会话',
-        messages: '消息', tickets: '工单', negative_feedback: '负面反馈' };
+        messages: '消息', tickets: '历史工单', negative_feedback: '负面反馈' };
       const cards = document.createElement('div'); cards.className = 'ops-stats';
       Object.entries(labels).forEach(([key, label]) => {
         const card = document.createElement('div'); card.className = 'ops-stat';
@@ -1339,5 +1419,6 @@ showEmpty();
 checkHealth();
 api('/auth/me').then(showApp).catch(showLogin);
 </script>
+<script src="/static/service-workbench.js?v=1.12.0"></script>
 </body>
 </html>

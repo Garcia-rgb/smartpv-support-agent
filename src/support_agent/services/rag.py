@@ -22,6 +22,7 @@ from .embeddings import (
 )
 from .industry import metadata_signals, query_facets
 from .knowledge_base import KnowledgeChunk, load_smartpv_corpus
+from .retrieval_quality import fallback_query, identity_adjustment
 from .semantic import EmbeddingBackend, get_embedding_backend
 
 logger = logging.getLogger("support_agent")
@@ -100,9 +101,10 @@ def out_of_corpus(
     返回 True 只代表「这个问题用的词，语料基本没讲过」，
     不代表语料里一定没有答案——校准过的阈值只能做到这个程度。
     """
-    return corpus_scope_reason(
-        query_units, query_phrases, unit_df, phrase_df, total_chunks
-    ) is not None
+    return (
+        corpus_scope_reason(query_units, query_phrases, unit_df, phrase_df, total_chunks)
+        is not None
+    )
 
 
 # 判为「语料范围外」的原因。两个分支的后续动作不同：
@@ -220,7 +222,10 @@ class RAGService:
         return key, Counter(tokenize(key)), Counter(retrieval_terms(key))
 
     async def corpus_index(
-        self, *, corpus_id: str | None = None, include_restricted: bool = False,
+        self,
+        *,
+        corpus_id: str | None = None,
+        include_restricted: bool = False,
         visibility: str | None = None,
     ) -> CorpusIndex:
         """读取权限范围内的片段，切词并统计词频（df）。"""
@@ -268,8 +273,8 @@ class RAGService:
 
         这里调的是模块级的同名纯函数，和 `search` 内部那条判据共用一份实现与一份语料统计。
         """
-        _, query_units, query_phrases = self.query_terms(query)
         index = await self.corpus_index(corpus_id=corpus_id, include_restricted=include_restricted)
+        _, query_units, query_phrases = self.query_terms(fallback_query(query, index.unit_df))
         return corpus_scope_reason(
             query_units, query_phrases, index.unit_df, index.phrase_df, index.total_chunks
         )
@@ -446,11 +451,14 @@ class RAGService:
         if cached is not None:
             return await self._hits_from_cache(cached, corpus_id, include_restricted, visibility)
 
-        query_embedding = (await self.backend.embed_async([key_query]))[0]
         facets = query_facets(key_query)
         index = await self.corpus_index(
             corpus_id=corpus_id, include_restricted=include_restricted, visibility=visibility
         )
+        key_query, query_units, query_phrases = self.query_terms(
+            fallback_query(query, index.unit_df)
+        )
+        query_embedding = (await self.backend.embed_async([key_query]))[0]
 
         # 库外判据（见 CORPUS_MISSING_CEILING 与 has_unknown_foreign_token）：
         # 问题用的词基本不在语料里时直接返回空结果，上游会把它当成
@@ -505,6 +513,8 @@ class RAGService:
                 score += MATCH_BONUS * len(signals.matched)
             if signals.conflicted:
                 score -= CONFLICT_PENALTY * len(signals.conflicted)
+            if score > 0.05:
+                score += identity_adjustment(query, chunk.content)
             if score > 0 and score >= min_score:
                 hits.append(SearchHit(chunk, document, score))
         ranked = sorted(hits, key=lambda hit: hit.score, reverse=True)[:top_k]

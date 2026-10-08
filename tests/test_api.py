@@ -1,4 +1,3 @@
-import hashlib
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -39,30 +38,15 @@ async def test_health_and_knowledge_chat(client: httpx.AsyncClient) -> None:
     assert len(session.json()["messages"]) == 2
 
 
-async def test_ticket_requires_confirmation_and_prevents_replay(
+async def test_retired_ticket_cannot_be_created(
     client: httpx.AsyncClient, db_session: AsyncSession
-) -> None:
+):
     chat = await client.post("/chat", json={"message": "我要投诉并创建工单", "user_id": "u1"})
-    pending = chat.json()["pending_action"]
-    assert pending["action"] == "create_ticket"
-
-    request = {"confirmation_token": pending["confirmation_token"], "user_id": "u1"}
-    created = await client.post("/tickets", json=request)
-    assert created.status_code == 201
-    assert created.json()["status"] == "open"
-
-    replay = await client.post("/tickets", json=request)
-    assert replay.status_code == 409
-
-    # 消费记录里只留哈希，不留令牌原文；并且和真正建出来的工单挂钩，
-    # 这样「哪一次的确认产生了哪张工单」是可查的。
-    consumed = await db_session.scalar(select(ConsumedConfirmationToken))
-    assert consumed is not None
-    assert consumed.token_hash == hashlib.sha256(
-        pending["confirmation_token"].encode()
-    ).hexdigest()
-    assert consumed.token_hash != pending["confirmation_token"]
-    assert consumed.ticket_id == created.json()["id"]
+    assert chat.json()["pending_action"] is None
+    assert "工单功能已取消" in chat.json()["answer"]
+    created = await client.post("/tickets", json={"confirmation_token": "old-token"})
+    assert created.status_code == 410
+    assert await db_session.scalar(select(ConsumedConfirmationToken)) is None
 
 
 async def test_expired_confirmation_token_is_rejected(client: httpx.AsyncClient) -> None:
@@ -77,11 +61,9 @@ async def test_expired_confirmation_token_is_rejected(client: httpx.AsyncClient)
         "test-secret",
         ttl_seconds=-1,
     )
-    response = await client.post(
-        "/tickets", json={"confirmation_token": token, "user_id": "u1"}
-    )
-    assert response.status_code == 400
-    assert "过期" in response.json()["detail"]
+    response = await client.post("/tickets", json={"confirmation_token": token, "user_id": "u1"})
+    assert response.status_code == 410
+    assert "已取消" in response.json()["detail"]
 
 
 async def test_consumed_token_cannot_be_recorded_twice(db_session: AsyncSession) -> None:

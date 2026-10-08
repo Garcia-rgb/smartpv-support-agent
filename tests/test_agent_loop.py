@@ -354,16 +354,14 @@ async def test_error_kinds_are_classified() -> None:
     assert missing_field.error_kind == "invalid_arguments"
 
 
-async def test_write_tool_reports_needs_confirmation_kind() -> None:
+async def test_retired_ticket_tool_is_not_offered():
     async def fake_search(query: str) -> str:
         return "[]"
-
     registry = build_support_registry(fake_search)
     outcome = await execute_tool_call("create_ticket", '{"reason": "逆变器告警"}', registry)
-
     assert outcome.ok is False
-    assert outcome.requires_confirmation is True
-    assert outcome.error_kind == "needs_confirmation"
+    assert outcome.requires_confirmation is False
+    assert outcome.error_kind == "unknown_tool"
 
 
 async def test_internal_tool_defect_is_classified_separately() -> None:

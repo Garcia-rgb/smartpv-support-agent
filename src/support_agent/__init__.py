@@ -8,7 +8,7 @@
 次版本号表示新增能力，修订号表示向后兼容的修复。
 """
 
-__version__ = "1.10.3"
+__version__ = "1.12.0"
 
 # 便于代码里做版本比较，例如「片段是本版本之前的写法，需要重导语料」。
 __version_info__ = tuple(int(part) for part in __version__.split("."))

@@ -92,17 +92,14 @@ async def test_knowledge_question_searches_the_knowledge_base() -> None:
     assert requested_tool(turn) == ("search_knowledge_base", {"query": "绝缘阻抗低怎么排查"})
 
 
-async def test_ticket_request_keeps_the_device_sn() -> None:
+async def test_retired_ticket_is_not_requested_by_local_model() -> None:
     model = RuleBasedLocalModel()
-
     turn = await model.chat_with_tools(
         [message("设备 SN-2024-000789 一直故障停机，我要投诉")], offered(build_registry())
     )
+    assert not turn.tool_calls
 
-    name, arguments = requested_tool(turn)
-    assert name == "create_ticket"
-    assert arguments["device_sn"] == "SN-2024-000789"
-    assert "投诉" in arguments["reason"]
+
 
 
 async def test_injection_never_reaches_a_tool() -> None:

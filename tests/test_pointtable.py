@@ -6,7 +6,12 @@ from support_agent.config import Settings, get_settings
 from support_agent.main import app
 from support_agent.models import UserAccount
 from support_agent.services.auth import hash_password
-from support_agent.services.pointtable import PointTableError, generate_csv, parse_protocol
+from support_agent.services.pointtable import (
+    PointTableError,
+    generate_csv,
+    parse_protocol,
+    validate_points,
+)
 
 
 def sample_doc() -> bytes:
@@ -45,6 +50,26 @@ def south_fields() -> dict[str, str]:
         "厂商名称": "测试厂商", "设备编码": "BRK_01", "协议类型": "MODBUS-RTU",
         "MODBUS设备地址": "2", "电站编号": "测试电站",
     }
+
+
+def test_validation_blocks_overlap_width_and_duplicate_north_numbers():
+    point = {"name": "电流", "address": "10", "function": "遥测", "register_type": "输入寄存器",
+             "access": "RO", "data_type": "UINT32", "count": "2", "gain": "1", "unit": "A"}
+    overlapping = {**point, "name": "功率", "address": "11"}
+    result = validate_points("south", south_fields(), [point, overlapping])
+    assert not result["valid"]
+    assert any("重叠" in error["message"] for error in result["errors"])
+    wrong = validate_points("south", south_fields(), [{**point, "count": "1"}])
+    assert any("应占2" in error["message"] for error in wrong["errors"])
+    north = [{"name": "电流", "north_address": "1", "function": "遥测", "unit": "A"},
+             {"name": "电压", "north_address": "1", "function": "遥测", "unit": "V"}]
+    assert not validate_points("north", {}, north)["valid"]
+    try:
+        generate_csv("north", {}, north)
+    except PointTableError:
+        pass
+    else:
+        raise AssertionError("重复北向点号不能导出")
 
 
 def test_protocol_drives_candidates_and_missing_north_numbers():

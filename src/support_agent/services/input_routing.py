@@ -8,7 +8,9 @@ _QUIZ_LABEL = re.compile(
     r"^(?:第\s*\d+\s*题|(?:单选|多选|判断|选择)(?:题)?|正确或错误)(?:\s|$)"
 )
 _QUESTION_END = re.compile(r"[？?]|[（(]\s*[）)]")
-_ISSUE_CONTEXT = re.compile(r"(?:客户|现场|工单|告警截图|报错截图|聊天记录|请帮我排查)")
+_ISSUE_CONTEXT = re.compile(
+    r"(?:客户|现场|工单|告警截图|报错截图|聊天记录|请帮我排查|多图资料联合分析)"
+)
 
 
 def is_quiz(text: str) -> bool:

@@ -183,16 +183,17 @@ async def test_admin_creates_user_who_can_only_use_business_features(
         data={"recognized_text": "判断题：设备停机后可以立即接触直流侧？\nA. 正确\nB. 错误"},
     )
     assert quiz.status_code == 200
-    pending = (await client.post(
+    retired = (await client.post(
         "/chat", headers={"X-CSRF-Token": user_csrf},
         json={"message": "我要投诉并创建工单"},
-    )).json()["pending_action"]
-    assert pending is not None
+    )).json()
+    assert retired["pending_action"] is None
     ticket = await client.post(
         "/tickets", headers={"X-CSRF-Token": user_csrf},
-        json={"confirmation_token": pending["confirmation_token"], "user_id": admin.id},
+        json={"confirmation_token": "retired", "user_id": admin.id},
     )
-    assert ticket.status_code == 201
+    assert ticket.status_code == 410
+
 
 
 async def test_disabling_and_resetting_user_revokes_sessions(

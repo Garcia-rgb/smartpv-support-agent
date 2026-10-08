@@ -11,6 +11,7 @@
 - **规则**仍然由服务端掌握。提示词注入拦截放在循环之外，因为安全判断不能交给模型。
 """
 
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy import select
@@ -38,6 +39,7 @@ from .local_summary import summarize_local_retrieval
 from .privacy import classify_question, safe_web_query, search_public_web
 from .quiz import QuizResponse, answer_question
 from .rag import RAGService, SearchHit
+from .retrieval_quality import applicability_note, identity_adjustment, query_variants
 from .security import create_confirmation_token, looks_like_prompt_injection
 from .tools import (
     DEVICE_SN_PATTERN,
@@ -78,6 +80,38 @@ CLARIFICATION_HINTS = [
 HISTORY_MESSAGE_CHARS = 2000
 # 写进审计日志的参数原文长度上限。
 AUDIT_ARGUMENT_CHARS = 500
+
+
+def conversation_context(text: str, history: list[dict[str, str]]) -> tuple[str, str]:
+    """Carry related follow-ups into retrieval; suggestions are never checked facts."""
+    if not history or re.search(r"新问题|换个问题|另一个问题|不说这个", text):
+        return text, text
+    followup = bool(
+        re.search(
+            r"这个|那个|它|还是|仍然|已经|已检查|检查了|试了|下一步|然后|接下来|"
+            r"为什么不选|为什么选|刚才|上面|前面|这台|继续|检查完|正常|"
+            r"恢复了|没恢复|灯亮|灯不亮|测得|测了|^怎么|^如何",
+            text,
+        )
+    ) or (len(text.strip()) <= 35 and not re.search(r"怎么|如何|是什么|怎么办", text))
+    if not followup:
+        return text, text
+    recent = history[-8:]
+    facts = [normalize_issue_input(m["content"])[:700] for m in recent if m["role"] == "user"]
+    reference = [m["content"][:800] for m in recent if m["role"] == "assistant"]
+    retrieval = "\n".join(facts + [text])[-3200:]
+    question = (
+        "同一对话的连续追问。结合已反馈结果回答当前问题，避免重复已做且无效的检查。\n"
+        "此前用户描述与反馈（仅用户明确确认的结果视为事实）：\n"
+        + "\n".join(facts)
+        + "\n此前助手回答（仅供理解追问，不是已执行操作或可靠资料）：\n"
+        + "\n".join(reference)
+        + "\n当前问题：\n"
+        + text
+    )
+    return retrieval, question
+
+
 # 这几个工具返回的是结构化事实；用它们答出来的结果，和「模型凭上下文自己说的」
 # 必须分开标注，否则评测无法区分「工具选对了」和「模型自由发挥」。
 BUSINESS_TOOLS = ("query_device", "calculator")
@@ -100,14 +134,22 @@ def _local_tool_request(text: str) -> bool:
 
 def _dedupe_hits(hits: list[SearchHit], top_k: int) -> list[SearchHit]:
     """同一个片段可能被多轮检索命中，按片段去重并按相关度取前若干条。"""
-    seen: set[str] = set()
-    unique: list[SearchHit] = []
+    unique: dict[str, SearchHit] = {}
     for hit in hits:
-        if hit.chunk.id in seen:
+        previous = unique.get(hit.chunk.id)
+        if previous is None or hit.score > previous.score:
+            unique[hit.chunk.id] = hit
+    ranked = sorted(unique.values(), key=lambda item: item.score, reverse=True)
+    contents, result = set(), []
+    for hit in ranked:
+        content = re.sub(r"\s+", "", hit.chunk.content)
+        if content in contents:
             continue
-        seen.add(hit.chunk.id)
-        unique.append(hit)
-    return sorted(unique, key=lambda item: item.score, reverse=True)[:top_k]
+        contents.add(content)
+        result.append(hit)
+        if len(result) == top_k:
+            break
+    return result
 
 
 @dataclass
@@ -155,14 +197,16 @@ class SupportAgent:
         )
 
     async def _privacy_knowledge_turn(
-        self, text: str, question: str | None = None,
+        self,
+        text: str,
+        question: str | None = None,
     ) -> TurnOutcome:
         """模型调用前确定资料边界；公开调用绝不带历史或内部片段。"""
         question = question or text
         decision = await classify_question(text, self.rag, self.settings)
         if decision.scope == "public":
-            hits = decision.public_hits
-            contexts = [hit.chunk.content for hit in hits[: self.settings.retrieval_top_k]]
+            hits = self.evidence_hits(decision.public_hits)
+            contexts = self.evidence_contexts(question, hits)
             answer = summarize_local_retrieval(text, hits)
             model = self.llm if self.settings.llm_enabled else self.local_llm
             if model.enabled:
@@ -171,27 +215,33 @@ class SupportAgent:
                 except LLMError:
                     pass
             return TurnOutcome(
-                status="completed", answer=answer, answer_source="knowledge",
-                citations=self.rag.citations(hits), hits=hits,
-                conflicts=self.rag.detect_conflicts(hits), privacy_scope="public",
+                status="completed",
+                answer=answer,
+                answer_source="knowledge",
+                citations=self.rag.citations(hits),
+                hits=hits,
+                conflicts=self.rag.detect_conflicts(hits),
+                privacy_scope="public",
             )
 
         # 内部问题可检索两类资料；按当前用户授权仅发送本次问题和命中片段。
         hits = await self.retrieve(text)
         if hits and hits[0].score >= 0.35:
+            hits = self.evidence_hits(hits)
             answer = summarize_local_retrieval(text, hits)
             if self.llm.enabled:
                 try:
-                    answer = await self.llm.answer(
-                        question,
-                        [prepare_evidence_context(hit.chunk.content, 1200) for hit in hits[:2]]
-                    )
+                    answer = await self.llm.answer(question, self.evidence_contexts(question, hits))
                 except LLMError:
                     pass
             return TurnOutcome(
-                status="completed", answer=answer, answer_source="knowledge",
-                citations=self.rag.citations(hits), hits=hits,
-                conflicts=self.rag.detect_conflicts(hits), privacy_scope="private",
+                status="completed",
+                answer=answer,
+                answer_source="knowledge",
+                citations=self.rag.citations(hits),
+                hits=hits,
+                conflicts=self.rag.detect_conflicts(hits),
+                privacy_scope="private",
             )
 
         safe_query = safe_web_query(text)
@@ -215,7 +265,9 @@ class SupportAgent:
                     f"- {item['title']}：{item['url']}" for item in results[:3]
                 )
                 return TurnOutcome(
-                    status="completed", answer=answer, answer_source="knowledge",
+                    status="completed",
+                    answer=answer,
+                    answer_source="knowledge",
                     privacy_scope="private",
                 )
             except LLMError:
@@ -224,12 +276,15 @@ class SupportAgent:
             status="failed",
             answer=(
                 "资料不足以确定答案；公开检索未配置、无安全搜索词或未找到可核对的结果。"
-                + ("请补充最后采集时间、设备本机读数、采集器在线状态和通信方式；"
-                   "需要该厂家型号的协议或经核实的处理记录。"
-                   if any(term in text for term in ("不刷新", "不更新", "没数据", "无数据"))
-                   else "")
+                + (
+                    "请补充最后采集时间、设备本机读数、采集器在线状态和通信方式；"
+                    "需要该厂家型号的协议或经核实的处理记录。"
+                    if any(term in text for term in ("不刷新", "不更新", "没数据", "无数据"))
+                    else ""
+                )
             ),
-            answer_source="policy", privacy_scope="private",
+            answer_source="policy",
+            privacy_scope="private",
         )
 
     async def _conversation(self, session_id: str | None, user_id: str) -> Conversation:
@@ -276,13 +331,60 @@ class SupportAgent:
         评测的检索层也走这里，因此它评的是线上真实用的那一次检索，
         而不是「另写一个不带 corpus_id 的 search」。
         """
-        hits = await self.rag.search(
-            query,
-            self.settings.retrieval_top_k,
-            corpus_id=self.settings.retrieval_corpus_id,
-            min_score=self.settings.retrieval_min_score,
-        )
+        hits = []
+        for variant in query_variants(query):
+            candidates = await self.rag.search(
+                variant,
+                max(12, self.settings.retrieval_top_k * 3),
+                corpus_id=self.settings.retrieval_corpus_id,
+                min_score=self.settings.retrieval_min_score,
+            )
+            # Canonical queries recover terminology, but original identities still govern rank.
+            hits.extend(
+                SearchHit(
+                    h.chunk,
+                    h.document,
+                    h.score
+                    + (
+                        identity_adjustment(query, h.chunk.content)
+                        - identity_adjustment(variant, h.chunk.content)
+                    ),
+                )
+                for h in candidates
+            )
         return _dedupe_hits(hits, self.settings.retrieval_top_k)
+
+    @staticmethod
+    def evidence_hits(hits: list[SearchHit]) -> list[SearchHit]:
+        """Select bounded evidence from different sources instead of blindly taking two."""
+        if not hits:
+            return []
+        candidates = [h for h in hits if h.score >= max(0.20, hits[0].score * 0.65)]
+        selected, counts = [], {}
+        for hit in candidates:
+            key = hit.document.id
+            if counts.get(key, 0) >= 2:
+                continue
+            selected.append(hit)
+            counts[key] = counts.get(key, 0) + 1
+            if len(selected) == 4:
+                break
+        return selected
+
+    @staticmethod
+    def evidence_contexts(question: str, hits: list[SearchHit]) -> list[str]:
+        contexts, remaining = [], 6000
+        for hit in hits:
+            prefix = applicability_note(question, hit.chunk.content)
+            # Source names are already visible to the authorized user through citations.
+            context = prefix + prepare_evidence_context(
+                hit.chunk.content, min(1800, remaining - len(prefix))
+            )
+            if len(context) > remaining:
+                break
+            contexts.append(context)
+            remaining -= len(context)
+        return contexts
 
     def _knowledge_searcher(self, sink: list[SearchHit]):
         """构造知识库检索工具的执行函数，同时把命中收集起来用于生成引用。
@@ -374,12 +476,21 @@ class SupportAgent:
                 blocked=True,
             )
 
+        if any(word in text for word in TICKET_KEYWORDS):
+            return TurnOutcome(
+                status="completed",
+                answer="工单功能已取消，请使用现有企业App处理工单。"
+                "这里可以继续协助排查问题和整理服务记录。",
+                answer_source="policy",
+            )
+
         # History keeps the full input; retrieval and generation use the fault summary.
         question = normalize_issue_input(text)
         text = normalize_issue_input(text, include_fields=False)
 
         if self.settings.privacy_routing_enabled and not _local_tool_request(text):
-            return await self._privacy_knowledge_turn(text, question)
+            retrieval, contextual_question = conversation_context(question, history)
+            return await self._privacy_knowledge_turn(retrieval, contextual_question)
 
         # 语料范围判定必须前置。实测模型遇到明显跑题的问题（「Python 怎么装环境」）
         # 根本不会去调检索工具，它直接凭「我是光伏助手」拒答——于是下面那句
@@ -467,11 +578,13 @@ class SupportAgent:
             return None
         decision = (
             await classify_question(text, self.rag, self.settings)
-            if self.settings.privacy_routing_enabled else None
+            if self.settings.privacy_routing_enabled
+            else None
         )
         public = decision is not None and decision.scope == "public"
         result = await answer_question(
-            self.db, text,
+            self.db,
+            text,
             llm_client=self.llm,
             visibility="public" if public else None,
         )
@@ -479,28 +592,42 @@ class SupportAgent:
             head = f"**结论** 选 {'、'.join(result.selected_options)}。"
         else:
             head = "**结论** 资料里没有足够依据确定选项，以下供你核对："
-        return f"{head}\n\n{result.explanation}", result, (
-            decision.scope if decision else None
-        )
+        return f"{head}\n\n{result.explanation}", result, (decision.scope if decision else None)
 
     async def save_quiz(
-        self, text: str, quiz: QuizResponse, session_id: str | None,
-        user_id: str, privacy_scope: str | None = None,
+        self,
+        text: str,
+        quiz: QuizResponse,
+        session_id: str | None,
+        user_id: str,
+        privacy_scope: str | None = None,
     ) -> ChatResponse:
         conversation = await self._conversation(session_id, user_id)
         chosen = "、".join(quiz.selected_options)
         answer = (f"选 {chosen}。" if chosen else "暂无法确定选项。") + "\n\n" + quiz.explanation
-        await self._save_message(conversation.id, "user", text)
-        assistant = await self._save_message(conversation.id, "assistant", answer,
-                                            [c.model_dump() for c in quiz.citations])
-        self.db.add(AuditLog(actor=user_id, action="quiz_answered", resource=conversation.id,
-                            detail={"status": quiz.status}))
+        user_message = await self._save_message(conversation.id, "user", text)
+        assistant = await self._save_message(
+            conversation.id, "assistant", answer, [c.model_dump() for c in quiz.citations]
+        )
+        self.db.add(
+            AuditLog(
+                actor=user_id,
+                action="quiz_answered",
+                resource=conversation.id,
+                detail={"status": quiz.status},
+            )
+        )
         await self.db.commit()
-        return ChatResponse(session_id=conversation.id, message_id=assistant.id, answer=answer,
-                            status=("completed" if quiz.status == "answered"
-                                    else "needs_clarification"),
-                            answer_source="knowledge" if quiz.citations else "policy",
-                            citations=quiz.citations, privacy_scope=privacy_scope)
+        return ChatResponse(
+            session_id=conversation.id,
+            message_id=assistant.id,
+            answer=answer,
+            user_message_id=user_message.id,
+            status=("completed" if quiz.status == "answered" else "needs_clarification"),
+            answer_source="knowledge" if quiz.citations else "policy",
+            citations=quiz.citations,
+            privacy_scope=privacy_scope,
+        )
 
     async def respond(self, text: str, session_id: str | None, user_id: str) -> ChatResponse:
         """处理一轮用户消息：跑 Agent Loop，并把用户消息和最终回答一起保存。
@@ -520,7 +647,7 @@ class SupportAgent:
         conversation = await self._conversation(session_id, user_id)
         # 历史必须在写入本轮用户消息之前读取，否则本轮问题会在上下文里出现两次。
         history = await self._history(conversation.id)
-        await self._save_message(conversation.id, "user", text)
+        user_message = await self._save_message(conversation.id, "user", text)
 
         outcome = await self.run_turn(text, history)
         if self.settings.privacy_routing_enabled and outcome.privacy_scope is None:
@@ -550,6 +677,7 @@ class SupportAgent:
         return ChatResponse(
             session_id=conversation.id,
             message_id=assistant_message.id,
+            user_message_id=user_message.id,
             status=outcome.status,
             answer=outcome.answer,
             answer_source=outcome.answer_source,

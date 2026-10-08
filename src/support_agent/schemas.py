@@ -155,6 +155,7 @@ class Clarification(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     message_id: str
+    user_message_id: str | None = None
     status: ChatStatus = "completed"
     answer: str
     answer_source: AnswerSource = "model"
@@ -178,6 +179,11 @@ class UnifiedInputResponse(BaseModel):
     chat: ChatResponse | None = None
 
 
+class MessageImageView(BaseModel):
+    id: str
+    content_type: str
+
+
 class MessageView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -185,6 +191,7 @@ class MessageView(BaseModel):
     content: str
     citations: list[dict]
     created_at: datetime
+    images: list[MessageImageView] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
@@ -200,6 +207,7 @@ class SessionSummary(BaseModel):
     id: str
     user_id: str
     created_at: datetime
+    title: str = ""
 
 
 class SessionListResponse(BaseModel):

@@ -145,10 +145,9 @@ def build_tool_registry() -> dict[str, ToolSpec]:
 def build_support_registry(
     search_knowledge_base: Callable[[str], Awaitable[str]],
 ) -> dict[str, ToolSpec]:
-    """在核心工具之上，补上需要请求上下文的两个工具。
+    """在核心工具之上，补上需要数据库会话的资料检索工具。
 
-    ``search_knowledge_base`` 需要数据库会话，``create_ticket`` 需要当前用户和会话，
-    所以它们不能写死在 ``build_tool_registry()`` 里，只能由调用方注入。
+    ``search_knowledge_base`` 需要数据库会话，由调用方注入。
     """
     registry = build_tool_registry()
     registry["search_knowledge_base"] = ToolSpec(
@@ -168,25 +167,6 @@ def build_support_registry(
         handler=lambda arguments: search_knowledge_base(arguments["query"]),
         # 检索要查库、算分、可能还要加载向量，给它比纯计算工具更宽的额度。
         timeout_seconds=15.0,
-    )
-    registry["create_ticket"] = ToolSpec(
-        name="create_ticket",
-        description=(
-            "为设备故障、发电异常、客户投诉转人工等诉求创建服务工单。这是写操作，"
-            "服务端不会自动执行，会先返回确认请求。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "reason": {"type": "string", "description": "工单诉求，尽量保留用户原话"},
-                "device_sn": {"type": "string", "description": "相关设备序列号，没有就不传"},
-            },
-            "required": ["reason"],
-            "additionalProperties": False,
-        },
-        # 这个函数永远不会被调用：写操作在 execute_tool_call 里就被拦下了。
-        handler=lambda arguments: {"created": True},
-        writes=True,
     )
     return registry
 

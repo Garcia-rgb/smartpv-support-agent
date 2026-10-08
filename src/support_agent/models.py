@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .config import get_settings
@@ -67,6 +67,17 @@ class SourceDocument(Base):
     content_type: Mapped[str] = mapped_column(String(100))
     checksum: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class MessageImage(Base):
+    """Original uploaded images stored locally with their owning user message."""
+
+    __tablename__ = "message_images"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    message_id: Mapped[str] = mapped_column(ForeignKey("messages.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    content_type: Mapped[str] = mapped_column(String(32))
+    data: Mapped[bytes] = mapped_column(LargeBinary)
 
 
 class DocumentChunk(Base):
@@ -144,5 +155,38 @@ class ConsumedConfirmationToken(Base):
     user_id: Mapped[str] = mapped_column(String(64))
     ticket_id: Mapped[str | None] = mapped_column(
         ForeignKey("tickets.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ServiceCase(Base):
+    """User-owned troubleshooting record, independent of generated suggestions."""
+
+    __tablename__ = "service_cases"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id"), nullable=True)
+    symptom: Mapped[str] = mapped_column(Text)
+    device: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(24), default="open")
+    observations: Mapped[list] = mapped_column(JSON, default=list)
+    answer: Mapped[str] = mapped_column(Text, default="")
+    citations: Mapped[list] = mapped_column(JSON, default=list)
+    cause: Mapped[str] = mapped_column(Text, default="")
+    solution: Mapped[str] = mapped_column(Text, default="")
+    verification: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ReviewedCase(Base):
+    __tablename__ = "reviewed_cases"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    service_case_id: Mapped[str] = mapped_column(ForeignKey("service_cases.id"), unique=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    reviewer: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    comment: Mapped[str] = mapped_column(Text, default="")
+    document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("source_documents.id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

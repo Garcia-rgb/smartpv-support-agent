@@ -269,7 +269,7 @@ async def test_structured_intents_are_exempt_from_the_corpus_gate(
         CORPUS_MISSING_MIN_CHUNKS + 5,
     )
 
-    for text in ("SN-2024-000123 这台设备现在什么状态", "帮我建个工单", "计算 100*0.986"):
+    for text in ("SN-2024-000123 这台设备现在什么状态", "计算 100*0.986"):
         model = CapturingModel("模拟回答")
         response = await SupportAgent(db_session, settings(), model=model).respond(
             text, None, "u1"
@@ -333,27 +333,15 @@ async def test_knowledge_answer_returns_citations_from_the_tool(
     assert [item["name"] for item in log.detail["tools"]] == ["search_knowledge_base"]
 
 
-async def test_write_action_still_needs_a_confirmation_token(
-    db_session: AsyncSession,
-) -> None:
+async def test_ticket_requests_use_existing_enterprise_app(db_session: AsyncSession):
     response = await SupportAgent(db_session, settings()).respond(
         "设备 SN-2024-000789 一直故障停机，我要投诉", None, "u1"
     )
-
-    assert response.pending_action is not None
-    assert response.pending_action.action == "create_ticket"
-    assert response.answer == "创建工单会产生写操作，请确认后再提交。"
-    # 写操作被拦下是一个独立终态，不是「正常完成」
-    assert response.status == "pending_confirmation"
+    assert response.pending_action is None
+    assert "工单功能已取消" in response.answer
+    assert response.status == "completed"
     assert response.answer_source == "policy"
     assert response.retryable is False
-
-    log = await db_session.scalar(
-        select(AuditLog).where(AuditLog.action == "agent_loop_tool_calls")
-    )
-    assert log is not None
-    assert log.detail["stopped_reason"] == "needs_confirmation"
-    assert log.detail["tools"][0]["ok"] is False
 
 
 async def test_prompt_injection_is_blocked_before_the_loop(db_session: AsyncSession) -> None:
@@ -391,7 +379,6 @@ async def test_remote_model_is_called_through_chat_with_tools(
         "calculator",
         "query_device",
         "search_knowledge_base",
-        "create_ticket",
     }
 
 

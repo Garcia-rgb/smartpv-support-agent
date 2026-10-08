@@ -130,7 +130,7 @@ async def test_answer_layer_reads_status_and_source(db_session: AsyncSession, tm
     assert second["layers"]["answer"]["status"] == "blocked"
 
 
-async def test_tool_layer_counts_blocked_write_as_correct_choice(
+async def test_retired_ticket_is_evaluated_as_policy_response(
     db_session: AsyncSession, tmp_path
 ) -> None:
     """写操作被拦下待确认时 ok=False，但工具层应算它「选对了」（拦下是设计如此）。"""
@@ -140,15 +140,14 @@ async def test_tool_layer_counts_blocked_write_as_correct_choice(
             {
                 "id": "write-01",
                 "question": "设备 SN-2024-000789 一直故障停机，我要投诉",
-                "tools": {"expected": ["create_ticket"]},
-                "answer": {"status": "pending_confirmation", "answer_source": ["policy"]},
+                "answer": {"status": "completed", "answer_source": ["policy"]},
             }
         ],
     )
     run = await run_evaluation(db_session, dataset, Settings(_env_file=None))
-    detail = run.details[0]["layers"]["tool"]
+    detail = run.details[0]["layers"]["answer"]
     assert detail["passed"] is True
-    assert detail["called"] == ["create_ticket"]
+    assert detail["status"] == "completed"
 
 
 async def test_answer_layer_reports_reasons_on_failure(db_session: AsyncSession, tmp_path) -> None:

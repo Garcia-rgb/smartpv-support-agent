@@ -1,6 +1,14 @@
 from support_agent.services.issue_input import normalize_issue_input
 
 
+def test_service_followup_search_uses_facts_not_generation_instructions():
+    prompt = ("现场问题：逆变器断联\n设备：华为\n已检查结果（最近三步）：\n"
+              "供电正常\n请结合结果给下一步")
+    assert "供电正常" in normalize_issue_input(prompt, include_fields=False)
+    assert "请结合" not in normalize_issue_input(prompt, include_fields=False)
+    assert "请结合" in normalize_issue_input(prompt)
+
+
 def test_chat_and_nameplate_keep_fault_address_and_model():
     raw = ("zb\n这台逆变器一直挂不上\n地址是2\n扫进去跑出来一个地址6的\n"
            "补充图片识别文字：\n合格证\n生产日期2025-09-16\n"

@@ -1,0 +1,9 @@
+[
+  {"id":"address_mismatch","question":"华为 SUN2000-100KTL-M2 挂不上，设备地址设置为2，扫描出来地址6，如何排查？","expected_source":"逆变器近端连接操作手册1","note":"应检索地址与近端核查依据，不能直接断定设备故障。"},
+  {"id":"platform_data","question":"现场平台逆变器数据不对，PV5至PV16电压电流显示横线，但有功功率仍有数值，如何核对？","expected_source":"问题和解决","note":"应命中平台/采集链路资料；截图不能证明每个空白字段都是故障。"},
+  {"id":"unknown_goodwe_model","question":"固德威 GW80K-MT 逆变器数据不刷新，如何排查？","expected_source":"问题和解决","note":"允许厂家通用采集核查，不得冒充GW80K-MT专用协议或套用华为参数。"},
+  {"id":"goodwe_paraphrase","question":"GW80K-MT 机器的监控数据一直停在旧时间，没有更新","expected_source":"问题和解决","note":"型号未收录时仍应召回通用通信核查资料。"},
+  {"id":"modbus_rules","question":"Modbus 南向点表寄存器地址、数据类型和倍率怎么填写？","expected_source":"Modbus协议的介绍及南向点表的使用和制作","note":"检索规则材料，不根据模型记忆生成设备协议。"},
+  {"id":"alarm_2062","question":"华为2062绝缘阻抗低告警怎么处理？","expected_terms":["2062","绝缘阻抗"],"note":"检索告警对应的处理依据。"},
+  {"id":"unrelated","question":"Python虚拟环境怎么安装？","expect_empty":true,"note":"不能把光伏安装环境片段当成Python依据。"}
+]

@@ -30,6 +30,9 @@ def normalize_issue_input(text: str, *, include_fields: bool = True) -> str:
     a field; OCR order is not used to reconstruct a whole table. The caller retains
     the original input for history and the OCR correction UI.
     """
+    if text.startswith("现场问题：") and "\n已检查结果（" in text and "\n请结合" in text:
+        # Service workflow instructions belong to generation, not evidence search.
+        return text if include_fields else text.split("\n请结合", 1)[0]
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if len(lines) < 4 or not _BACKGROUND.search(text):
         return text
@@ -61,4 +64,44 @@ def normalize_issue_input(text: str, *, include_fields: bool = True) -> str:
         parts.append("平台采集数据、组串与点表如何核对？")
     else:
         parts.append("如何排查？")
+    return "\n".join(parts)
+
+
+_CHAT_QUESTION = re.compile(r"怎么|如何|为什么|帮忙|帮我|请问|看一下|看下")
+_CHAT_CONTEXT = re.compile(r"现场|现在有人|已经|已尝试|之前|一直|地址|通讯|通信|连接")
+_MENTION = re.compile(r"@[^@\s]*?(?=帮忙|帮我|请|看一下|看下|\s|$)")
+
+
+def prepare_screenshot_question(text: str) -> str:
+    """Locally extract chat content; never send detected chat names to generation.
+
+    Raw OCR is returned separately for local correction. Ambiguous chat screenshots
+    without a recognizable question are rejected rather than forwarded verbatim.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    repeated = {line for line in lines if lines.count(line) > 1
+                and len(line) <= 30 and not (_ISSUE.search(line) or _CHAT_QUESTION.search(line))}
+    is_chat = bool(re.search(r"@", text) or repeated)
+    if not is_chat:
+        return normalize_issue_input(text)
+    content = []
+    for line in lines:
+        cleaned = _MENTION.sub("", line).strip()
+        for name in repeated:
+            if cleaned.startswith(name + "：") or cleaned.startswith(name + ":"):
+                cleaned = cleaned[len(name) + 1:].strip()
+        if not cleaned or cleaned in repeated:
+            continue
+        if _ISSUE.search(cleaned) or _CONSTRAINT.search(cleaned) or _CHAT_QUESTION.search(cleaned):
+            content.append(cleaned)
+        elif content and _CHAT_CONTEXT.search(cleaned):
+            content.append(cleaned)
+    if not content:
+        raise ValueError("未能可靠识别聊天截图中的问题，请补充问题文字或裁剪聊天内容")
+    # Only explicit equipment identities are admitted from surrounding UI/nameplates.
+    identities = list(dict.fromkeys(match.group(0) for pattern in (_BRAND, _MODEL)
+                                   for match in pattern.finditer(text)))
+    parts = ["客户现场问题：" + "；".join(dict.fromkeys(content))]
+    if identities:
+        parts.append("设备：" + "、".join(identities))
     return "\n".join(parts)

@@ -274,7 +274,7 @@ def _safe_text(value: str, label: str, *, required: bool = True) -> str:
     return value
 
 
-def generate_csv(
+def _generate_csv_unchecked(
     direction: str, fields: dict[str, str], points: list[dict[str, str]]
 ) -> tuple[bytes, str]:
     if direction not in {"south", "north"}:
@@ -342,3 +342,63 @@ def generate_csv(
     writer.writerows(output_rows)
     filename = "点表_南向.csv" if direction == "south" else "点表_北向.csv"
     return output.getvalue().encode("utf-8-sig"), filename
+
+
+def validate_points(direction: str, fields: dict[str, str], points: list[dict[str, str]]) -> dict:
+    """Return all blocking row errors and review warnings before any export."""
+    errors, warnings = [], []
+    if direction not in {"south", "north"} or not 1 <= len(points) <= MAX_POINTS:
+        return {"valid": False, "errors": [{"row": 0, "message": "方向或点位数量不正确"}],
+                "warnings": []}
+    occupied, names = {}, {}
+    widths = {"BIT": 1, "UINT16": 1, "INT16": 1, "UINT32": 2, "INT32": 2,
+              "FLOAT": 2, "DOUBLE": 4}
+    for index, point in enumerate(points, 1):
+        try:
+            _generate_csv_unchecked(direction, fields, [point])
+        except PointTableError as exc:
+            errors.append({"row": index, "message": str(exc).replace("第1个", f"第{index}个")})
+            continue
+        name = point["name"].strip()
+        if name in names:
+            warnings.append({"row": index,
+                             "message": f"名称与第{names[name]}行相同，请确认是否不同测点"})
+        names[name] = index
+        if direction == "north":
+            addresses = [int(_address(point["north_address"], north=True))]
+            register, access = "north", ""
+        else:
+            address, count = int(_address(point["address"])), int(point["count"])
+            register, access = point["register_type"], point["access"]
+            width = widths[point["data_type"]]
+            if count != width:
+                errors.append({"row": index, "message": f"{point['data_type']}应占{width}个寄存器"})
+            if register in {"线圈", "输入离散量"} and point["data_type"] != "BIT":
+                errors.append({"row": index, "message": "线圈或离散量应使用BIT数据类型"})
+            if address + count - 1 > 65535:
+                errors.append({"row": index, "message": "寄存器范围超过65535"})
+            addresses = range(address, address + count)
+            if point["function"] in {"遥控", "双点遥控", "遥调"}:
+                warnings.append({"row": index, "message": "控制点须核对厂家写入说明和现场操作授权"})
+        for address in addresses:
+            key = (register, access, address)
+            if key in occupied:
+                errors.append({"row": index,
+                               "message": f"地址{address}与第{occupied[key]}行重复或重叠"})
+                break
+        else:
+            for address in addresses:
+                occupied[(register, access, address)] = index
+    warnings.append({"row": 0,
+                     "message": "地址基数、字序、倍率及单位仍须结合厂家协议与现场读数确认"})
+    return {"valid": not errors, "errors": errors, "warnings": warnings}
+
+
+def generate_csv(
+    direction: str, fields: dict[str, str], points: list[dict[str, str]]
+) -> tuple[bytes, str]:
+    result = validate_points(direction, fields, points)
+    if not result["valid"]:
+        raise PointTableError("；".join(
+            f"第{item['row']}行：{item['message']}" for item in result["errors"][:8]))
+    return _generate_csv_unchecked(direction, fields, points)
