@@ -20,7 +20,7 @@
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install smartpv_support_agent-1.10.0-py3-none-any.whl
+pip install smartpv_support_agent-1.10.1-py3-none-any.whl
 ```
 
 装完先跑自检，把它当成部署门禁：
@@ -60,7 +60,7 @@ smartpv-agent serve --host 0.0.0.0 --port 8000
 | `APP_ENV` | `production` | 只影响 `/health` 的显示，不改变行为 |
 | `PRIVACY_ROUTING_ENABLED` | `true` | 普通/隐私资料分流；生产部署必须显式开启 |
 | `ALLOW_REMOTE_LLM` | 默认 `false` | 仅普通资料获准外发后设为 `true` |
-| `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` | 本机回环地址与模型名 | 隐私问题需要本地生成时配置 |
+| `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` | 本机回环地址与模型名 | 保留的本地模型配置；当前隐私问答并不因此改走本地 |
 | `PUBLIC_SEARCH_API_KEY` | 可留空 | 隐私问题本地无依据时，用安全短查询查公开网页 |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | 三项**同时**非空 | 缺一项就退回本地规则模型 |
 | `EMBEDDING_BACKEND` / `EMBEDDING_MODEL_PATH` / `EMBEDDING_DIMENSION` | **与建库时一致** | 换后端必须重建索引，否则向量空间对不上 |

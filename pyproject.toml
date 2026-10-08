@@ -7,7 +7,7 @@ name = "smartpv-support-agent"
 # 版本号单一来源：src/support_agent/__init__.py 的 __version__。
 # 打包、/health、OpenAPI 与 CLI 都从这里取，避免多处手写导致版本分叉。
 dynamic = ["version"]
-description = "光伏电站技术支持 Agent：混合检索、工具调用、人工确认与分层离线评测"
+description = "光伏技术支持助手：现场问答、图片刷题、设备协议点表与管理员运行框架"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -24,7 +24,7 @@ keywords = [
   "semantic-search",
 ]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: Web Environment",
   "Framework :: FastAPI",
   "Intended Audience :: Developers",
