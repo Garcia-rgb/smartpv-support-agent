@@ -30,7 +30,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import __version__
-from .config import Settings, get_settings
+from .admin_routes import router as admin_router
+from .config import Settings, get_settings, validate_runtime_settings
 from .db import create_schema, get_db
 from .models import (
     AuditLog,
@@ -42,7 +43,7 @@ from .models import (
     Ticket,
     UserAccount,
 )
-from .observability import request_observability
+from .observability import configure_file_logging, request_observability
 from .schemas import (
     AuthResponse,
     ChatRequest,
@@ -76,6 +77,7 @@ from .services.auth import (
     token_hash,
     verify_password,
 )
+from .services.backups import archive_source
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
 from .services.input_routing import is_quiz
@@ -115,6 +117,9 @@ STATIC_DIR = locate_static_dir()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """应用启动时创建数据库表，关闭时释放缓存连接。"""
+    settings = get_settings()
+    validate_runtime_settings(settings)
+    configure_file_logging(settings.log_dir)
     await create_schema()
     yield
     # Redis 没配时这是空操作；配了就必须关，否则测试和热重载会攒下一堆连接。
@@ -128,6 +133,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.middleware("http")(request_observability)
+app.include_router(admin_router)
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -337,13 +343,18 @@ async def parse_point_table_protocol(
 
 
 @app.post("/point-tables/generate")
-async def make_point_table(body: PointTableGenerateRequest, user: AuthenticatedUser) -> Response:
+async def make_point_table(
+    body: PointTableGenerateRequest, user: AuthenticatedUser, db: DbDep,
+) -> Response:
     if user is None:
         raise HTTPException(403, "需要登录账号")
     try:
         content, filename = generate_csv(body.direction, body.fields, body.points)
     except PointTableError as exc:
         raise HTTPException(422, str(exc)) from exc
+    db.add(AuditLog(actor=user.id, action="point_table_generated", resource=body.direction,
+                    detail={"points": len(body.points)}))
+    await db.commit()
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",
@@ -413,6 +424,10 @@ async def upload_document(
         raise HTTPException(400, str(exc)) from exc
     except EmbeddingUnavailableError as exc:
         raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
+    await run_in_threadpool(archive_source, settings, filename, data)
+    db.add(AuditLog(actor=_admin.id if _admin else "system", action="document_imported",
+                    resource=document.id, detail={"chunks": chunks, "duplicate": duplicate}))
+    await db.commit()
     return DocumentResponse(
         id=document.id, filename=document.filename, chunks=chunks, duplicate=duplicate
     )
@@ -492,6 +507,15 @@ async def chat(
         raise HTTPException(503, f"本地检索未就绪：{exc}") from exc
 
 
+@app.get("/ready")
+async def ready(db: DbDep) -> dict:
+    try:
+        await db.execute(select(1))
+    except Exception as exc:
+        raise HTTPException(503, "数据库未就绪") from exc
+    return {"status": "ready", "version": __version__}
+
+
 @app.post("/input", response_model=UnifiedInputResponse)
 async def unified_input(
     db: DbDep,
@@ -503,6 +527,10 @@ async def unified_input(
     session_id: Annotated[str | None, Form()] = None,
 ) -> UnifiedInputResponse:
     """Normalize image/text input, then route clear exam questions to quiz logic."""
+    identity = user.id if user else "demo-user"
+    if session_id and not await db.scalar(select(Conversation.id).where(
+            Conversation.id == session_id, Conversation.user_id == identity)):
+        raise HTTPException(404, "会话不存在")
     prompt = (message or "").strip()
     recognized = None
     if file:
@@ -520,6 +548,8 @@ async def unified_input(
     elif not prompt:
         raise HTTPException(400, "请输入问题或上传图片")
     raw = recognized or prompt
+    if len(raw) > 4000:
+        raise HTTPException(400, "识别文字过长，请裁剪图片或精简问题")
     issue_hint = any(word in prompt for word in ("客户", "现场", "告警", "报错", "排查", "故障"))
     if is_quiz(raw) and not issue_hint:
         identity = user.id if user else "demo-user"
@@ -529,6 +559,9 @@ async def unified_input(
                                 headers=decision.headers)
         response.headers.update(decision.headers)
         result = await analyze_quiz(db, settings, user, recognized_text=raw)
+        saved = await SupportAgent(db, settings).save_quiz(raw, result, session_id, identity)
+        result.session_id = saved.session_id
+        result.message_id = saved.message_id
         return UnifiedInputResponse(kind="quiz", recognized_text=recognized, quiz=result)
     combined = f"{prompt}\n{recognized}" if prompt and recognized else raw
     if len(combined) > 4000:

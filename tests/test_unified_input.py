@@ -49,3 +49,7 @@ async def test_text_exam_uses_quiz_pipeline(client, monkeypatch):
     assert result.status_code == 200
     assert result.json()["kind"] == "quiz"
     assert result.json()["quiz"]["selected_options"] == ["A"]
+    session = result.json()["quiz"]["session_id"]
+    saved = (await client.get("/sessions/" + session)).json()
+    assert len(saved["messages"]) == 2
+    assert "依据教材" in saved["messages"][-1]["content"]

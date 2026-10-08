@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir .
 # 所以把 /app 的所有权交出去——只降权不交权，默认的 sqlite:///./support_agent.db 会建不出来。
 # HOME 一起改掉：不给的话它仍是 /root，个别库会去写一个不可写的目录。
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/operations /app/knowledge_base \
     && chown -R appuser:appuser /app
 ENV HOME=/home/appuser
 USER appuser

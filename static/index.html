@@ -245,6 +245,16 @@
   .credential { background: #fff9eb; border: 1px solid #f0d9ad; border-radius: 9px;
     padding: 10px 12px; margin: 12px 0; overflow-wrap: anywhere; }
 
+  .ops-card { width: min(980px, 95vw); max-height: 88vh; overflow-y: auto; }
+  .ops-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+  .ops-row { padding: 12px 0; border-top: 1px solid var(--line); }
+  .ops-row strong { display: block; overflow-wrap: anywhere; }
+  .ops-row .pointtable-fields { margin-top: 8px; }
+  .ops-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px; }
+  .ops-stat { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .ops-stat strong { display: block; font-size: 24px; color: var(--brand); }
+  .ops-pager { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+
   @media (max-width: 860px) { .sidebar { display: none; } }
   @media (max-width: 480px) {
     .user-create { flex-direction: column; align-items: stretch; }
@@ -295,6 +305,20 @@
     <button class="ghost" id="usersClose" type="button" style="width:100%;margin-top:16px">关闭</button>
   </div>
 </div>
+<div class="login-screen" id="opsScreen" hidden>
+  <div class="login-card ops-card">
+    <h1>管理中心</h1>
+    <div class="ops-nav">
+      <button class="ghost" data-ops="overview">运行概况</button>
+      <button class="ghost" data-ops="documents">资料管理</button>
+      <button class="ghost" data-ops="audit">操作记录</button>
+      <button class="ghost" data-ops="backups">备份</button>
+    </div>
+    <div class="err" id="opsError" role="alert"></div>
+    <div id="opsContent"></div>
+    <button class="ghost" id="opsClose" type="button" style="width:100%;margin-top:16px">关闭</button>
+  </div>
+</div>
 <div class="app" id="appRoot" hidden>
   <aside class="sidebar">
     <div class="brand">
@@ -321,6 +345,7 @@
       <span class="badge" id="modeBadge">…</span>
       <span class="spacer"></span>
       <span class="badge" id="userBadge">未登录</span>
+      <button class="ghost" id="opsBtn" type="button" hidden>管理中心</button>
       <button class="ghost" id="usersBtn" type="button" hidden>管理用户</button>
       <button class="ghost" id="passwordBtn" type="button">修改密码</button>
       <button class="ghost" id="logoutBtn" type="button">退出</button>
@@ -404,6 +429,7 @@ function showLogin() {
   $('appRoot').hidden = true;
   $('passwordScreen').hidden = true;
   $('usersScreen').hidden = true;
+  $('opsScreen').hidden = true;
   $('loginScreen').hidden = false;
   $('loginPassword').value = '';
 }
@@ -415,9 +441,11 @@ function showApp(user) {
   $('uploadBtn').hidden = user.role !== 'admin';
   $('knowledgeLabel').hidden = user.role !== 'admin';
   $('usersBtn').hidden = user.role !== 'admin';
+  $('opsBtn').hidden = user.role !== 'admin';
   $('loginScreen').hidden = true;
   $('passwordScreen').hidden = true;
   $('usersScreen').hidden = true;
+  $('opsScreen').hidden = true;
   $('appRoot').hidden = false;
   loadSessions();
   input.focus();
@@ -617,6 +645,10 @@ function addBot(payload) {
 }
 
 function addQuizResult(payload) {
+  if (payload.session_id) {
+    state.sessionId = payload.session_id;
+    loadSessions();
+  }
   const el = document.createElement('div');
   el.className = 'msg bot';
   const body = document.createElement('div');
@@ -650,6 +682,7 @@ function addQuizResult(payload) {
     finally { btn.disabled = false; }
   };
   body.appendChild(edit);
+  if (payload.message_id) body.appendChild(feedbackBlock(payload.message_id));
   el.innerHTML = '<div class="avatar">AI</div>';
   el.appendChild(body);
   wrap.appendChild(el);
@@ -977,6 +1010,7 @@ $('fileInput').onchange = async function (e) {
     const r = await api('/documents', { method: 'POST', body: fd });
     $('uploadMsg').textContent =
       (r.duplicate ? '已存在，跳过：' : '导入成功：') + r.filename + ' · ' + r.chunks + ' 片段';
+    if (!$('opsScreen').hidden) loadOps();
   } catch (err) {
     $('uploadMsg').textContent = '导入失败：' + err.message;
   }
@@ -1174,6 +1208,131 @@ Object.entries(WORKFLOWS).forEach(function ([key, item]) {
   b.dataset.workflow = key;
   b.onclick = function () { openWorkflow(key); };
   chipBox.appendChild(b);
+});
+
+
+const ops = { tab: 'overview', offset: 0, busy: false };
+const auditNames = {
+  login: '登录', password_changed: '修改密码', user_created: '创建账号',
+  user_disabled: '停用账号', user_enabled: '启用账号', document_imported: '导入资料',
+  document_updated: '修改资料', backup_created: '创建备份', quiz_answered: '题目讲解',
+  prompt_injection_blocked: '拦截异常请求', point_table_generated: '生成点表',
+};
+function opsPager(total) {
+  const pager = document.createElement('div');
+  pager.className = 'ops-pager';
+  const prev = document.createElement('button'); prev.className = 'ghost'; prev.textContent = '上一页';
+  prev.disabled = ops.offset === 0;
+  prev.onclick = () => { ops.offset = Math.max(0, ops.offset - 25); loadOps(); };
+  const next = document.createElement('button'); next.className = 'ghost'; next.textContent = '下一页';
+  next.disabled = ops.offset + 25 >= total;
+  next.onclick = () => { ops.offset += 25; loadOps(); };
+  const text = document.createElement('span'); text.textContent = '共 ' + total + ' 条';
+  pager.append(prev, text, next);
+  return pager;
+}
+async function loadOps() {
+  if (ops.busy) return;
+  ops.busy = true;
+  $('opsError').textContent = '';
+  $('opsContent').textContent = '正在加载…';
+  try {
+    const url = '/admin/' + ops.tab +
+      (['documents', 'audit'].includes(ops.tab) ? '?limit=25&offset=' + ops.offset : '');
+    const data = await api(url);
+    const box = $('opsContent'); box.innerHTML = '';
+    if (ops.tab === 'overview') {
+      const labels = { documents: '资料', chunks: '资料片段', users: '账号', conversations: '会话',
+        messages: '消息', tickets: '工单', negative_feedback: '负面反馈' };
+      const cards = document.createElement('div'); cards.className = 'ops-stats';
+      Object.entries(labels).forEach(([key, label]) => {
+        const card = document.createElement('div'); card.className = 'ops-stat';
+        card.innerHTML = '<strong>' + esc(data.counts[key]) + '</strong>' + label;
+        cards.appendChild(card);
+      });
+      box.appendChild(cards);
+      const note = document.createElement('p');
+      note.textContent = '版本 ' + data.version + ' · 身份验证' + (data.auth_enabled ? '已开启' : '未开启') +
+        ' · 远程模型' + (data.model_enabled ? '已配置' : '未配置') +
+        ' · 最近备份：' + (data.latest_backup[0]?.created_at || '暂无');
+      box.appendChild(note);
+    } else if (ops.tab === 'documents') {
+      const upload = document.createElement('button'); upload.className = 'ghost'; upload.textContent = '导入资料';
+      upload.onclick = () => $('fileInput').click(); box.appendChild(upload);
+      const note = document.createElement('p'); note.textContent = '停用资料后，后续回答不再检索它；旧会话中的引用仍会保留。';
+      box.appendChild(note);
+      data.items.forEach((doc) => {
+        const row = document.createElement('div'); row.className = 'ops-row';
+        row.innerHTML = '<strong>' + esc(doc.filename) + '</strong><span class="hint">' + doc.chunks +
+          ' 个片段 · ' + (doc.enabled ? '使用中' : '已停用') + '</span>';
+        const fields = document.createElement('div'); fields.className = 'pointtable-fields';
+        const versionLabel = document.createElement('label'); versionLabel.textContent = '资料版本';
+        const version = document.createElement('input'); version.maxLength = 80;
+        version.value = doc.document_version || ''; versionLabel.appendChild(version);
+        const scopeLabel = document.createElement('label'); scopeLabel.textContent = '所属资料库';
+        const scope = document.createElement('select');
+        [['', '混合'], ['private', '隐私库'], ['public', '普通库']].forEach(([value, label]) => {
+          const option = document.createElement('option'); option.value = value; option.textContent = label;
+          scope.appendChild(option);
+        });
+        scope.value = doc.visibility === 'mixed' ? '' : doc.visibility; scopeLabel.appendChild(scope);
+        fields.append(versionLabel, scopeLabel); row.appendChild(fields);
+        const actions = document.createElement('div'); actions.className = 'pointtable-actions';
+        const save = document.createElement('button'); save.className = 'ghost'; save.textContent = '保存设置';
+        const toggle = document.createElement('button'); toggle.className = 'ghost';
+        toggle.textContent = doc.enabled ? '停用资料' : '启用资料';
+        async function update(body, btn) {
+          btn.disabled = true;
+          try {
+            await api('/admin/documents/' + encodeURIComponent(doc.id), { method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            await loadOps();
+          } catch (error) { $('opsError').textContent = error.message; }
+          finally { btn.disabled = false; }
+        }
+        save.onclick = () => update({ document_version: version.value.trim(),
+          ...(scope.value ? { visibility: scope.value } : {}) }, save);
+        toggle.onclick = () => update({ enabled: !doc.enabled }, toggle);
+        actions.append(save, toggle); row.appendChild(actions); box.appendChild(row);
+      });
+      box.appendChild(opsPager(data.total));
+    } else if (ops.tab === 'audit') {
+      data.items.forEach((item) => {
+        const row = document.createElement('div'); row.className = 'ops-row';
+        row.textContent = new Date(item.created_at).toLocaleString('zh-CN') + ' · ' + item.actor + ' · ' +
+          (auditNames[item.action] || item.action);
+        box.appendChild(row);
+      });
+      box.appendChild(opsPager(data.total));
+    } else {
+      const button = document.createElement('button'); button.className = 'primary'; button.textContent = '创建备份';
+      button.onclick = async () => {
+        button.disabled = true; button.textContent = '正在备份…';
+        try { await api('/admin/backups', { method: 'POST' }); await loadOps(); }
+        catch (error) { $('opsError').textContent = error.message; }
+        finally { button.disabled = false; button.textContent = '创建备份'; }
+      };
+      box.appendChild(button);
+      const note = document.createElement('p');
+      note.textContent = '备份包含本地数据库和资料原件，不包含模型密钥。可下载留存；恢复时使用恢复工具，先恢复到新目录并核验，再停止服务切换。';
+      box.appendChild(note);
+      data.items.forEach((item) => {
+        const row = document.createElement('div'); row.className = 'ops-row';
+        const label = document.createElement('span');
+        label.textContent = item.name + ' · ' + (item.bytes / 1024 / 1024).toFixed(1) + ' MB ';
+        const link = document.createElement('a'); link.textContent = '下载备份';
+        link.href = '/admin/backups/' + encodeURIComponent(item.name);
+        row.append(label, link); box.appendChild(row);
+      });
+      if (!data.items.length) box.appendChild(document.createTextNode('暂无备份'));
+    }
+  } catch (error) { $('opsError').textContent = error.message; $('opsContent').textContent = ''; }
+  finally { ops.busy = false; }
+}
+$('opsBtn').onclick = () => { $('opsScreen').hidden = false; ops.offset = 0; loadOps(); };
+$('opsClose').onclick = () => { $('opsScreen').hidden = true; };
+document.querySelectorAll('[data-ops]').forEach((button) => {
+  button.onclick = () => { if (ops.busy) return; ops.tab = button.dataset.ops; ops.offset = 0; loadOps(); };
 });
 
 showEmpty();

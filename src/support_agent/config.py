@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_env: str = "development"
+    backup_dir: str = ".backups"
+    knowledge_base_dir: str = "knowledge_base"
+    log_dir: str = ".logs"
     auth_enabled: bool = True
     database_url: str = "sqlite+aiosqlite:///./support_agent.db"
     # 检索缓存与限流共用的存储。留空则用进程内实现：本地开发和 CI 走这条，
@@ -85,6 +88,20 @@ class Settings(BaseSettings):
         if self.embedding_dimension:
             return self.embedding_dimension
         return EMBEDDING_DIMENSIONS.get((self.embedding_backend or "hash").lower(), 384)
+
+
+def validate_runtime_settings(settings: Settings) -> None:
+    if settings.app_env == "production":
+        if not settings.auth_enabled:
+            raise ValueError("正式环境必须开启身份验证")
+        if len(settings.confirmation_secret) < 32 or settings.confirmation_secret in {
+                "development-only-secret", "local-compose-secret"}:
+            raise ValueError("正式环境须设置至少 32 个字符的独立 CONFIRMATION_SECRET")
+        from sqlalchemy.engine import make_url
+
+        url = make_url(settings.database_url)
+        if url.get_backend_name() == "postgresql" and len(url.password or "") < 16:
+            raise ValueError("正式 PostgreSQL 须配置至少 16 个字符的独立数据库密码")
 
 
 @lru_cache

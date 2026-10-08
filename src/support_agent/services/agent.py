@@ -29,11 +29,12 @@ from ..schemas import (
 )
 from .agent_loop import LoopResult, ToolCallRecord, build_support_registry, run_agent_loop
 from .industry import describe_facets
+from .input_routing import is_quiz
 from .llm import LLMError, OpenAICompatibleClient
 from .local_model import RuleBasedLocalModel
 from .local_summary import summarize_local_retrieval
 from .privacy import classify_question, safe_web_query, search_public_web
-from .quiz import QuizResponse, answer_question, parse_question
+from .quiz import QuizResponse, answer_question
 from .rag import RAGService, SearchHit
 from .security import create_confirmation_token, looks_like_prompt_injection
 from .tools import (
@@ -446,9 +447,7 @@ class SupportAgent:
 
         返回 (聊天回答文本, 刷题结果)；聊天文本是在 explanation 前面加上明确的选项结论。
         """
-        try:
-            parse_question(text)
-        except ValueError:
+        if not is_quiz(text):
             return None
         decision = (
             await classify_question(text, self.rag, self.settings)
@@ -468,6 +467,25 @@ class SupportAgent:
             decision.scope if decision else None
         )
 
+    async def save_quiz(
+        self, text: str, quiz: QuizResponse, session_id: str | None,
+        user_id: str, privacy_scope: str | None = None,
+    ) -> ChatResponse:
+        conversation = await self._conversation(session_id, user_id)
+        chosen = "、".join(quiz.selected_options)
+        answer = (f"选 {chosen}。" if chosen else "暂无法确定选项。") + "\n\n" + quiz.explanation
+        await self._save_message(conversation.id, "user", text)
+        assistant = await self._save_message(conversation.id, "assistant", answer,
+                                            [c.model_dump() for c in quiz.citations])
+        self.db.add(AuditLog(actor=user_id, action="quiz_answered", resource=conversation.id,
+                            detail={"status": quiz.status}))
+        await self.db.commit()
+        return ChatResponse(session_id=conversation.id, message_id=assistant.id, answer=answer,
+                            status=("completed" if quiz.status == "answered"
+                                    else "needs_clarification"),
+                            answer_source="knowledge" if quiz.citations else "policy",
+                            citations=quiz.citations, privacy_scope=privacy_scope)
+
     async def respond(self, text: str, session_id: str | None, user_id: str) -> ChatResponse:
         """处理一轮用户消息：跑 Agent Loop，并把用户消息和最终回答一起保存。
 
@@ -476,27 +494,12 @@ class SupportAgent:
         """
         # 消息长得像一道题（有题干 + 至少两个选项）时直接走刷题判定，
         # 让手打/粘贴在聊天框的题目也能拿到确定的选项，而不是一段不给结论的话术。
+        if session_id:
+            await self._conversation(session_id, user_id)
         quiz = await self._try_quiz(text)
         if quiz is not None:
-            quiz_answer, quiz_result, quiz_scope = quiz
-            conversation = await self._conversation(session_id, user_id)
-            await self._save_message(conversation.id, "user", text)
-            assistant_message = await self._save_message(
-                conversation.id,
-                "assistant",
-                quiz_answer,
-                [citation.model_dump() for citation in quiz_result.citations],
-            )
-            await self.db.commit()
-            return ChatResponse(
-                session_id=conversation.id,
-                message_id=assistant_message.id,
-                status="completed",
-                answer=quiz_answer,
-                answer_source="knowledge",
-                privacy_scope=quiz_scope,
-                citations=quiz_result.citations,
-            )
+            _, quiz_result, quiz_scope = quiz
+            return await self.save_quiz(text, quiz_result, session_id, user_id, quiz_scope)
 
         conversation = await self._conversation(session_id, user_id)
         # 历史必须在写入本轮用户消息之前读取，否则本轮问题会在上下文里出现两次。

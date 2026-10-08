@@ -15,3 +15,12 @@ pytest-temp
 dist
 build
 htmlcov
+
+# Internal material and operations data must not enter build context
+knowledge_base
+.backups
+.logs
+recovery
+.localdeps
+.testdeps
+.pytest-runs

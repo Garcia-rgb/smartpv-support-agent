@@ -5,10 +5,13 @@ services:
     # 手动 down 掉的服务不该在下次开机时自己回来。
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
     environment:
-      APP_ENV: docker
-      DATABASE_URL: postgresql+asyncpg://agent:agent@postgres:5432/agent
+      APP_ENV: ${DEPLOY_ENV:-docker}
+      AUTH_ENABLED: "true"
+      BACKUP_DIR: /app/operations/backups
+      LOG_DIR: /app/operations/logs
+      DATABASE_URL: postgresql+asyncpg://agent:${POSTGRES_PASSWORD:-agent}@postgres:5432/agent
       REDIS_URL: redis://redis:6379/0
       CONFIRMATION_SECRET: ${CONFIRMATION_SECRET:-local-compose-secret}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
@@ -32,6 +35,9 @@ services:
       # 单用户每窗口的 /chat 次数，0 表示不限流。
       RATE_LIMIT_REQUESTS: "30"
       RATE_LIMIT_WINDOW_SECONDS: "60"
+    volumes:
+      - operations_data:/app/operations
+      - knowledge_base_data:/app/knowledge_base
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,7 +67,7 @@ services:
     environment:
       POSTGRES_DB: agent
       POSTGRES_USER: agent
-      POSTGRES_PASSWORD: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agent}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -81,4 +87,6 @@ services:
       retries: 10
 
 volumes:
+  knowledge_base_data:
+  operations_data:
   postgres_data:

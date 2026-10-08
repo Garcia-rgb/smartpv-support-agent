@@ -281,6 +281,7 @@ async def answer_question(
                 .where(SourceDocument.filename.contains("M11-"))
             )
         ).all()
+        row = [r for r in row if (r[0].chunk_metadata or {}).get("enabled") is not False]
         if visibility == "public":
             row = [r for r in row if (r[0].chunk_metadata or {}).get("visibility") == "public"]
         evidence = next(
@@ -323,6 +324,8 @@ async def answer_question(
                 .where(SourceDocument.filename.contains("题解析"))
             )
         ).all()
+        bank_rows = [r for r in bank_rows
+                     if (r[0].chunk_metadata or {}).get("enabled") is not False]
         if visibility == "public":
             bank_rows = [
                 r for r in bank_rows if (r[0].chunk_metadata or {}).get("visibility") == "public"

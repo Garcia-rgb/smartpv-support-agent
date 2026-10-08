@@ -236,6 +236,8 @@ class RAGService:
         phrase_df: Counter[str] = Counter()
         for chunk, document in rows:
             metadata = chunk.chunk_metadata or {}
+            if metadata.get("enabled") is False:
+                continue
             # 未标记的历史资料一律视为内部资料，不能因升级而变成可外发内容。
             is_public = metadata.get("visibility") == "public"
             if (visibility == "public" and not is_public) or (

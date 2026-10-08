@@ -106,6 +106,8 @@ class QuizResponse(BaseModel):
     explanation: str
     citations: list[Citation]
     recognized_text: str
+    session_id: str | None = None
+    message_id: str | None = None
 
 
 class PendingAction(BaseModel):

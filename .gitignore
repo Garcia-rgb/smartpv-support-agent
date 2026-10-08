@@ -24,3 +24,8 @@ build/
 
 # 本地内部资料原件及转换稿，不提交到公开仓库
 /knowledge_base/
+
+# Local operations data; never publish snapshots or logs
+/.backups/
+/.logs/
+/recovery/

@@ -47,12 +47,15 @@ async def db_session(tmp_path) -> AsyncIterator[AsyncSession]:
 
 
 @pytest_asyncio.fixture
-async def client(db_session: AsyncSession) -> AsyncIterator[httpx.AsyncClient]:
+async def client(db_session: AsyncSession, tmp_path) -> AsyncIterator[httpx.AsyncClient]:
     settings = Settings(
         database_url="sqlite+aiosqlite:///unused.db",
         confirmation_secret="test-secret",
         max_upload_bytes=1024 * 1024,
         auth_enabled=False,
+        backup_dir=str(tmp_path / "backups"),
+        knowledge_base_dir=str(tmp_path / "knowledge_base"),
+        log_dir=str(tmp_path / "logs"),
     )
 
     async def override_db():

@@ -1,12 +1,12 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.9.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.10.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776ab)](pyproject.toml)
 [![coverage](https://img.shields.io/badge/coverage-88.84%25-brightgreen)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 [![code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000)](https://github.com/astral-sh/ruff)
 
-当前版本 **1.9.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **1.10.0**，包名 `smartpv-support-agent`，命令行入口 `smartpv-agent`。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 这是一个面向光伏电站技术支持场景的问答与办事服务：工程师把现场现象或问题丢进来，它去知识库里找依据、
 必要时查设备档案或算一段，涉及写操作（建工单）时先要人工确认。项目覆盖 FastAPI、数据库、RAG、LangGraph、
@@ -534,3 +534,7 @@ git tag v1.0.0                       # 4. 打标签，与 CHANGELOG 的版本号
 
 演示与测试环境使用本地示例数据与模拟工单，**不接真实客户数据，也不接真实支付或退款操作**。
 部署前需要落实的事项见 [SECURITY.md](SECURITY.md)，上线检查清单见 [docs/deployment.md](docs/deployment.md)。
+
+## 企业管理与运行
+
+admin 可在右上角管理中心查看运行概况、管理资料版本和启用状态、查看审计记录、创建和下载本地备份。刷题与现场问答统一保存会话。部署、备份恢复及验收边界见 [企业运行框架](docs/enterprise_framework.md)。

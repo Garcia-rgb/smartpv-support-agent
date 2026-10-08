@@ -477,6 +477,8 @@ async def load_hits_by_id(
     found: dict[str, tuple[DocumentChunk, SourceDocument]] = {}
     for chunk, document in rows:
         metadata = chunk.chunk_metadata or {}
+        if metadata.get("enabled") is False:
+            continue
         if corpus_id and metadata.get("corpus_id") != corpus_id:
             continue
         if not include_restricted and metadata.get("restricted") is True:
