@@ -2,6 +2,8 @@
 
 import re
 
+from .telemetry_input import PLATFORM, TELEMETRY
+
 _MODEL = re.compile(
     r"(?<![A-Z0-9])(?:SUN2000-[A-Z0-9-]+|GW\d+[A-Z0-9-]+|"
     r"SmartLogger\d*[A-Z0-9-]*|LUNA2000-[A-Z0-9-]+)(?![A-Z0-9])", re.I
@@ -11,7 +13,8 @@ _BRAND = re.compile(r"华为|HUAWEI|固德威|GOODWE", re.I)
 _ISSUE = re.compile(
     r"挂不上|挂载不上|下挂不到|不刷新|不更新|数据.{0,4}不对|没(?:有)?数据|"
     r"无数据|无直流|离线|掉线|断联|通讯失败|通信失败|请求超时|告警|报错|"
-    r"故障|异常|扫.{0,12}地址|地址.{0,6}\d|offline|error", re.I
+    r"故障|异常|不正常|值有问题|亮红灯|亮.{0,3}蓝灯|坏了|"
+    r"扫.{0,12}地址|地址.{0,6}\d|offline|error", re.I
 )
 _CONSTRAINT = re.compile(r"不要|不能|禁止|不允许|只读|已尝试|已经尝试")
 _BACKGROUND = re.compile(
@@ -48,7 +51,7 @@ def normalize_issue_input(text: str, *, include_fields: bool = True) -> str:
         "固德威" if match.group(0).upper() == "GOODWE" else match.group(0)
         for pattern in (_BRAND, _MODEL) for match in pattern.finditer(text)
     ))
-    fields = []
+    fields = [line for line in lines if line.startswith("截图数值行")]
     for index, line in enumerate(lines):
         if _FIELD.match(line):
             following = lines[index + 1] if index + 1 < len(lines) else ""
@@ -72,7 +75,7 @@ _CHAT_CONTEXT = re.compile(r"现场|现在有人|已经|已尝试|之前|一直|
 _MENTION = re.compile(r"@[^@\s]*?(?=帮忙|帮我|请|看一下|看下|\s|$)")
 
 
-def prepare_screenshot_question(text: str) -> str:
+def prepare_screenshot_question(text: str, *, user_question: str = "") -> str:
     """Locally extract chat content; never send detected chat names to generation.
 
     Raw OCR is returned separately for local correction. Ambiguous chat screenshots
@@ -81,7 +84,12 @@ def prepare_screenshot_question(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     repeated = {line for line in lines if lines.count(line) > 1
                 and len(line) <= 30 and not (_ISSUE.search(line) or _CHAT_QUESTION.search(line))}
-    is_chat = bool(re.search(r"@", text) or repeated)
+    is_chat = bool(re.search(r"@", text) or repeated or (
+        len(lines) > 1 and len(lines[0]) <= 20
+        and re.search(r"你好|请问|我问|帮我|帮忙", "\n".join(lines[1:]))
+        and not (_ISSUE.search(lines[0]) or TELEMETRY.search(lines[0])
+                 or _MODEL.search(lines[0]) or _BRAND.search(lines[0]))
+    ))
     if not is_chat:
         return normalize_issue_input(text)
     content = []
@@ -90,13 +98,20 @@ def prepare_screenshot_question(text: str) -> str:
         for name in repeated:
             if cleaned.startswith(name + "：") or cleaned.startswith(name + ":"):
                 cleaned = cleaned[len(name) + 1:].strip()
-        if not cleaned or cleaned in repeated:
+        if not cleaned or cleaned in repeated or cleaned in {"告警信息", "暂无数据", "告警"}:
             continue
         if _ISSUE.search(cleaned) or _CONSTRAINT.search(cleaned) or _CHAT_QUESTION.search(cleaned):
             content.append(cleaned)
         elif content and _CHAT_CONTEXT.search(cleaned):
             content.append(cleaned)
+    if not content and PLATFORM.search(text):
+        content.append("请核查平台实时数据是否异常")
     if not content:
+        if user_question.strip():
+            # Repeated device-list labels are not evidence of a chat screenshot.
+            # Use the explicit question without forwarding unidentified UI/name text.
+            return ("客户现场问题：" + user_question.strip()
+                    + "\n截图未能可靠提取问题或状态，请依据文字排查；不要假定图片中的设备状态。")
         raise ValueError("未能可靠识别聊天截图中的问题，请补充问题文字或裁剪聊天内容")
     # Only explicit equipment identities are admitted from surrounding UI/nameplates.
     identities = list(dict.fromkeys(match.group(0) for pattern in (_BRAND, _MODEL)
@@ -104,4 +119,11 @@ def prepare_screenshot_question(text: str) -> str:
     parts = ["客户现场问题：" + "；".join(dict.fromkeys(content))]
     if identities:
         parts.append("设备：" + "、".join(identities))
+    # A chat screenshot can contain a platform screenshot. Keep its locally read
+    # measurements separately from chat names and symptom text.
+    fields = [line for line in lines if line.startswith("截图数值行")]
+    if fields:
+        parts.extend(dict.fromkeys(fields))
+    if PLATFORM.search(text):
+        parts.append("平台截图：设备实时数据；空白字段、告警暂无数据不等于故障已确认。")
     return "\n".join(parts)

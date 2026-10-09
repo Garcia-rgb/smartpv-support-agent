@@ -13,7 +13,9 @@ import json
 from typing import Any
 
 from ..graph import build_route_graph
+from .engineering_intents import plan_engineering
 from .llm import AssistantTurn, ToolCallRequest
+from .modbus_tools import render_modbus, render_registers
 
 ERROR_PREFIX = "错误："
 FALLBACK_ANSWER = "我可以帮你查询设备运行状态、计算数值，或者回答产品与运维规范方面的问题。"
@@ -72,6 +74,20 @@ class RuleBasedLocalModel:
             return self._finalize(messages)
 
         text = _last_user_message(messages)
+        plan = plan_engineering(text, messages[:-1])
+        if plan:
+            if plan.error:
+                return AssistantTurn(plan.error)
+            if plan.name not in available:
+                return AssistantTurn(NO_TOOL_ANSWER)
+            return AssistantTurn(
+                "",
+                [
+                    ToolCallRequest(
+                        "engineering_1", plan.name, json.dumps(plan.arguments, ensure_ascii=False)
+                    )
+                ],
+            )
         state = await self.graph.ainvoke({"message": text})
         route = state["route"]
         if route == "blocked":
@@ -127,5 +143,9 @@ class RuleBasedLocalModel:
             )
         if name == "create_ticket":
             return "创建工单会产生写操作，请确认后再提交。"
+        if name == "modbus_parse" and isinstance(payload, dict):
+            return render_modbus(payload)
+        if name == "register_decode" and isinstance(payload, dict):
+            return render_registers(payload)
         # search_knowledge_base 返回的片段本身就带 [资料n] 标注，直接给出即可。
         return output

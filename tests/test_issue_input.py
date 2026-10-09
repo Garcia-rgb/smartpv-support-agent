@@ -1,6 +1,16 @@
 from support_agent.services.issue_input import normalize_issue_input
 
 
+def test_repeated_ui_labels_with_caption_do_not_block_question():
+    from support_agent.services.issue_input import prepare_screenshot_question
+
+    result = prepare_screenshot_question(
+        "设备管理\n状态\n状态\n名称\n名称", user_question="最近经常断联是什么情况"
+    )
+    assert "最近经常断联" in result
+    assert "截图未能可靠" in result
+
+
 def test_service_followup_search_uses_facts_not_generation_instructions():
     prompt = ("现场问题：逆变器断联\n设备：华为\n已检查结果（最近三步）：\n"
               "供电正常\n请结合结果给下一步")

@@ -33,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, Protocol
 
 from .llm import AssistantTurn, LLMError
+from .modbus_tools import decode_registers, parse_modbus_frame
 from .tools import ToolError, query_device, safe_calculate
 
 MAX_ROUNDS = 5
@@ -55,6 +56,7 @@ SYSTEM_PROMPT = (
     "你是光伏电站技术支持助手。涉及设备状态、数值、产品规定和运维流程时，先调用工具取得事实，"
     "再依据工具结果作答：查设备用 query_device，算数用 calculator，"
     "产品规定和运维问题用 search_knowledge_base。"
+    "Modbus报文用modbus_parse校验，寄存器数值用register_decode计算，不能凭记忆猜结果。"
     "直接回答用户问的那件事：给结论和可执行的步骤，不要交代检索过程、不要解释信息来源、"
     "不要把资料标签复述一遍。"
     "引用依据时只用一句短标签带过（例如「依据 V2.0 工商业版」），不要罗列机型清单；"
@@ -109,7 +111,7 @@ def build_tool_registry() -> dict[str, ToolSpec]:
 
     这里的工具都是纯计算，不依赖数据库或请求上下文。
     """
-    return {
+    registry = {
         "calculator": ToolSpec(
             name="calculator",
             description="计算纯算术表达式，例如 (12+8)/4。只支持数字与 + - * / // % **。",
@@ -140,6 +142,45 @@ def build_tool_registry() -> dict[str, ToolSpec]:
             handler=lambda arguments: asdict(query_device(arguments["sn"])),
         ),
     }
+    registry["modbus_parse"] = ToolSpec(
+        name="modbus_parse",
+        description="本机解析单帧Modbus RTU/TCP报文，检查CRC/长度及功能码、异常码；不连接设备。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "frame": {"type": "string"},
+                "transport": {"type": "string", "enum": ["auto", "rtu", "tcp"]},
+                "direction": {"type": "string", "enum": ["auto", "request", "response"]},
+            },
+            "required": ["frame"],
+            "additionalProperties": False,
+        },
+        handler=lambda a: parse_modbus_frame(**a),
+    )
+    registry["register_decode"] = ToolSpec(
+        name="register_decode",
+        description="精确解码16位寄存器数组；字序未知列候选，不猜；乘数是原值相乘，不等于点表除数增益。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "registers": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                    "maxItems": 4,
+                },
+                "data_type": {"type": "string"},
+                "byte_order": {"type": "string", "enum": ["big", "little", "unknown"]},
+                "word_order": {"type": "string", "enum": ["high_first", "low_first", "unknown"]},
+                "multiplier": {"type": "number"},
+                "offset": {"type": "number"},
+            },
+            "required": ["registers", "data_type"],
+            "additionalProperties": False,
+        },
+        handler=lambda a: decode_registers(**a),
+    )
+    return registry
 
 
 def build_support_registry(
@@ -195,8 +236,12 @@ def parse_arguments(spec: ToolSpec, raw_arguments: Any) -> dict[str, Any]:
         expected = properties[name].get("type")
         if expected == "string" and not isinstance(value, str):
             raise ToolArgumentError(f"参数 {name} 必须是字符串")
-        if expected == "number" and not isinstance(value, int | float):
+        if expected == "number" and (isinstance(value, bool) or not isinstance(value, int | float)):
             raise ToolArgumentError(f"参数 {name} 必须是数字")
+        if expected == "array" and not isinstance(value, list):
+            raise ToolArgumentError(f"参数 {name} 必须是数组")
+        if "enum" in properties[name] and value not in properties[name]["enum"]:
+            raise ToolArgumentError(f"参数 {name} 不在允许范围内")
     return arguments
 
 

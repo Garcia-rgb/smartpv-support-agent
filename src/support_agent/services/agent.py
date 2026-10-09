@@ -14,11 +14,12 @@
 import re
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from ..config import Settings
-from ..models import AuditLog, Conversation, Message
+from ..models import AuditLog, Conversation, Message, MessageImage
 from ..schemas import (
     AnswerSource,
     ChatResponse,
@@ -28,19 +29,28 @@ from ..schemas import (
     PendingAction,
     VersionConflict,
 )
-from .agent_loop import LoopResult, ToolCallRecord, build_support_registry, run_agent_loop
+from .agent_loop import (
+    LoopResult,
+    ToolCallRecord,
+    build_support_registry,
+    build_tool_registry,
+    run_agent_loop,
+)
+from .business_skills import instructions, issue_state, select_skill, starts_issue
+from .engineering_intents import plan_engineering
 from .evidence import prepare_evidence_context
 from .industry import describe_facets
 from .input_routing import is_quiz
-from .issue_input import normalize_issue_input
+from .issue_input import normalize_issue_input, prepare_screenshot_question
 from .llm import LLMError, OpenAICompatibleClient
 from .local_model import RuleBasedLocalModel
 from .local_summary import summarize_local_retrieval
 from .privacy import classify_question, safe_web_query, search_public_web
-from .quiz import QuizResponse, answer_question
+from .quiz import QuizResponse, answer_question, recognize_image
 from .rag import RAGService, SearchHit
 from .retrieval_quality import applicability_note, identity_adjustment, query_variants
 from .security import create_confirmation_token, looks_like_prompt_injection
+from .telemetry_input import general_checks, platform_issue
 from .tools import (
     DEVICE_SN_PATTERN,
     TICKET_KEYWORDS,
@@ -109,6 +119,8 @@ def conversation_context(text: str, history: list[dict[str, str]]) -> tuple[str,
         + "\n当前问题：\n"
         + text
     )
+    if state := issue_state(text, history):
+        question = state + "\n\n" + question
     return retrieval, question
 
 
@@ -178,6 +190,8 @@ class TurnOutcome:
     clarification: Clarification | None = None
     blocked: bool = False
     privacy_scope: str | None = None
+    next_action: str | None = None
+    skill_id: str | None = None
 
 
 class SupportAgent:
@@ -242,6 +256,21 @@ class SupportAgent:
                 hits=hits,
                 conflicts=self.rag.detect_conflicts(hits),
                 privacy_scope="private",
+            )
+
+        if platform_issue(question):
+            hits = self.evidence_hits(hits)
+            answer = general_checks()
+            status = "completed"
+            if self.llm.enabled:
+                try:
+                    answer = await self.llm.answer(question, self.evidence_contexts(question, hits))
+                except LLMError:
+                    status = "degraded"
+            return TurnOutcome(
+                status=status, answer=answer,
+                answer_source="knowledge" if hits else "model",
+                citations=self.rag.citations(hits), hits=hits, privacy_scope="private",
             )
 
         safe_query = safe_web_query(text)
@@ -320,6 +349,50 @@ class SupportAgent:
                 .limit(self.settings.chat_history_limit)
             )
         ).all()
+        first_user = await self.db.scalar(
+            select(Message)
+            .where(Message.session_id == session_id, Message.role == "user")
+            .order_by(Message.created_at, Message.id)
+            .limit(1)
+        )
+        topic_anchor = await self.db.scalar(
+            select(Message)
+            .where(
+                Message.session_id == session_id,
+                Message.role == "user",
+                or_(
+                    Message.content.like("%另一个问题%"),
+                    Message.content.like("%换个问题%"),
+                    Message.content.like("%新问题%"),
+                    Message.content.like("%不说这个%"),
+                ),
+            )
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(1)
+        )
+        topic_log = await self.db.scalar(
+            select(AuditLog)
+            .where(AuditLog.resource == session_id, AuditLog.action == "issue_topic_started")
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .limit(1)
+        )
+        if topic_log and topic_log.detail.get("root_message_id"):
+            root_message = await self.db.get(Message, topic_log.detail["root_message_id"])
+            if (
+                root_message
+                and root_message.session_id == session_id
+                and (not topic_anchor or root_message.created_at > topic_anchor.created_at)
+            ):
+                topic_anchor = root_message
+        first_user = topic_anchor or first_user
+        if topic_anchor:
+            rows = [
+                m
+                for m in rows
+                if (m.created_at, m.id) >= (topic_anchor.created_at, topic_anchor.id)
+            ]
+        if first_user and all(item.id != first_user.id for item in rows):
+            rows.append(first_user)
         return [
             {"role": item.role, "content": item.content[:HISTORY_MESSAGE_CHARS]}
             for item in reversed(rows)
@@ -474,6 +547,50 @@ class SupportAgent:
                 answer=INJECTION_ANSWER,
                 answer_source="policy",
                 blocked=True,
+            )
+
+        plan = plan_engineering(text, history)
+        if plan:
+            if plan.error:
+                return TurnOutcome(
+                    status="needs_clarification",
+                    answer=plan.error,
+                    answer_source="policy",
+                    next_action=plan.name,
+                )
+            result = await run_agent_loop(
+                RuleBasedLocalModel(),
+                text,
+                registry=build_tool_registry(),
+                history=history,
+                max_rounds=2,
+            )
+            success = any(record.ok for record in result.tool_calls)
+            return TurnOutcome(
+                status="completed" if success else "needs_clarification",
+                answer=result.answer,
+                answer_source="tool" if success else "policy",
+                loop=result,
+                next_action=plan.name if not success else None,
+            )
+
+        skill = select_skill(text)
+        if skill and skill.identifier == "point_table":
+            # Load the packaged workflow, then dispatch the existing authenticated editor.
+            instructions(skill.identifier)
+            direction = (
+                "北向"
+                if "北向" in text and "南向" not in text
+                else ("南向" if "南向" in text and "北向" not in text else "先选择南向或北向")
+            )
+            return TurnOutcome(
+                status="completed",
+                answer_source="policy",
+                answer=f"点表制作：{direction}，上传设备协议Word/PDF。\n"
+                "我会提取原文点位；缺失项由你补充，再检查地址、数据类型、倍率和字序。\n"
+                "确认后生成下载文件，尚未写入现场设备。",
+                next_action="point_table",
+                skill_id=skill.identifier,
             )
 
         if any(word in text for word in TICKET_KEYWORDS):
@@ -647,6 +764,35 @@ class SupportAgent:
         conversation = await self._conversation(session_id, user_id)
         # 历史必须在写入本轮用户消息之前读取，否则本轮问题会在上下文里出现两次。
         history = await self._history(conversation.id)
+        new_issue = starts_issue(text, history)
+        if new_issue:
+            history = []
+        elif history and re.search(r"图片|截图|平台显示|电压|电流", text) and "【图片" not in text:
+            # Repair older conversations whose first OCR pass discarded telemetry.
+            # Only images belonging to user messages in this active topic qualify.
+            message_id = await self.db.scalar(
+                select(Message.id).join(MessageImage, MessageImage.message_id == Message.id)
+                .where(Message.session_id == conversation.id, Message.role == "user",
+                       Message.content.in_([m["content"] for m in history if m["role"] == "user"]))
+                .order_by(Message.created_at.desc()).limit(1)
+            )
+            if message_id:
+                images = (await self.db.scalars(select(MessageImage)
+                    .where(MessageImage.message_id == message_id)
+                    .order_by(MessageImage.position).limit(6))).all()
+                recovered = []
+                for image in images:
+                    try:
+                        raw = await run_in_threadpool(recognize_image, image.data)
+                        prepared = prepare_screenshot_question(raw)
+                        recovered.append(prepared)
+                    except (ValueError, RuntimeError):
+                        continue
+                if recovered:
+                    text += (
+                        "\n本会话历史图片重新识别（数值需核对）：\n"
+                        + "\n".join(recovered)[:2400]
+                    )
         user_message = await self._save_message(conversation.id, "user", text)
 
         outcome = await self.run_turn(text, history)
@@ -660,8 +806,28 @@ class SupportAgent:
             self.db.add(
                 AuditLog(actor=user_id, action="prompt_injection_blocked", resource=conversation.id)
             )
+        elif new_issue:
+            self.db.add(
+                AuditLog(
+                    actor=user_id,
+                    action="issue_topic_started",
+                    resource=conversation.id,
+                    detail={"root_message_id": user_message.id},
+                )
+            )
         if outcome.loop is not None:
             self._audit_tool_calls(user_id, conversation.id, outcome.loop)
+        skill = select_skill(text) or (select_skill(outcome.answer) if outcome.skill_id else None)
+        if skill:
+            outcome.skill_id = skill.identifier
+            self.db.add(
+                AuditLog(
+                    actor=user_id,
+                    action="business_skill_activated",
+                    resource=conversation.id,
+                    detail={"skill": skill.identifier, "version": skill.version},
+                )
+            )
 
         assistant_message = await self._save_message(
             conversation.id,
@@ -687,6 +853,8 @@ class SupportAgent:
             clarification=outcome.clarification,
             retryable=outcome.retryable,
             conflicts=outcome.conflicts,
+            next_action=outcome.next_action,
+            skill_id=outcome.skill_id,
         )
 
 

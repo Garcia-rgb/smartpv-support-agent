@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import DocumentChunk, SourceDocument
 from ..schemas import Citation, QuizResponse
 from .rag import RAGService
+from .telemetry_input import spatial_telemetry_rows
 
 OPTION_RE = re.compile(r"^([A-F])(?:\s*[.、．:：)）]\s*|\s+|(?=[\u4e00-\u9fff]))(.+)$", re.I)
 # OCR 有时把选项字母单独切成一个文本框（"C" 一行、"25kW" 一行）。
@@ -39,7 +40,8 @@ def recognize_image(data: bytes) -> str:
         result = _ocr_engine()(data)
     except Exception as exc:
         raise ValueError("图片无法识别，请换一张清晰截图") from exc
-    return "\n".join(result.txts or ())
+    rows = spatial_telemetry_rows(result)
+    return "\n".join(list(result.txts or ()) + rows)
 
 
 def parse_question(raw_text: str) -> tuple[str, str, dict[str, str]]:

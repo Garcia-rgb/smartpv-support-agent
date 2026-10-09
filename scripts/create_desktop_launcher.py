@@ -7,7 +7,7 @@ LinkTargetIDList（shell 命名空间的二进制目录链）。缺了它，文�
 正规途径 WScript.Shell COM 在受限环境里又未必可用。
 
 所以这里退一步：直接在桌面放一个双击即用的启动脚本。功能与快捷方式完全一致
-（双击启动 + 自动开浏览器），而且是纯文本，看得见、改得动。
+（双击启动独立桌面窗口），而且是纯文本，看得见、改得动。
 
 注意启动脚本内容必须是纯 ASCII：cmd.exe 解析批处理时用的是「读取该行时的代码页」，
 而文件自身的编码是固定的，两边的中文一旦对不上就会报「命令语法不正确」。
@@ -30,11 +30,8 @@ chcp 65001 >nul
 title PV Station Support Agent
 cd /d "{root}"
 set "PYTHONPATH={root}\src;{root}\.localdeps"
-echo Starting SmartPV Support Agent, please wait...
-"{python}" -u "{script}"
-echo.
-echo Press any key to close this window...
-pause >nul
+start "" /B "{python}" "{script}"
+exit /b
 """
 
 
@@ -57,12 +54,14 @@ def main() -> int:
         print("该脚本只用于 Windows。")
         return 1
 
-    script = ROOT / "scripts" / "start_client.py"
+    script = ROOT / "scripts" / "start_desktop.py"
     if not script.exists():
         print(f"找不到启动脚本：{script}")
         return 1
 
-    content = TEMPLATE.format(root=ROOT, python=sys.executable, script=script)
+    windowed_python = Path(sys.executable).with_name("pythonw.exe")
+    interpreter = str(windowed_python) if windowed_python.exists() else sys.executable
+    content = TEMPLATE.format(root=ROOT, python=interpreter, script=script)
     destination = desktop_directory() / LAUNCHER_NAME
     # 用 CRLF 写：cmd.exe 对纯 LF 的批处理偶尔会解析异常。
     destination.write_text(content, encoding="utf-8", newline="\r\n")
@@ -70,7 +69,7 @@ def main() -> int:
     print(f"启动器已创建：{destination}")
     print(f"  解释器：{sys.executable}")
     print(f"  项目目录：{ROOT}")
-    print("双击即可启动服务并自动打开浏览器。")
+    print("双击即可打开独立桌面客户端。")
     return 0
 
 

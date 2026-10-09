@@ -153,6 +153,8 @@ class Clarification(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    next_action: Literal["point_table", "modbus_parse", "register_decode"] | None = None
+    skill_id: Literal["point_table", "site_troubleshooting"] | None = None
     session_id: str
     message_id: str
     user_message_id: str | None = None

@@ -55,6 +55,8 @@
   .session.active { background: var(--brand-soft); border-color: #bfe0da; color: #0b5a54; font-weight: 600; }
   .session small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
   .side-foot { padding: 12px 14px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+  .account-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin:10px 0; }
+  .account-actions .ghost { padding:7px 4px; font-size:12px; }
 
   /* ---------- 主区 ---------- */
   .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -224,6 +226,22 @@
   .err { color: var(--danger); font-size: 13px; }
   [hidden] { display: none !important; }
   .login-screen { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+  #passwordScreen, #usersScreen, #opsScreen {
+    position: fixed; inset: 0; z-index: 100; min-height: 0;
+    background: rgba(24, 32, 42, .35); backdrop-filter: blur(3px);
+    overflow: auto;
+  }
+  body { overflow: hidden; }
+  #loginScreen { height: 100vh; overflow: auto; }
+  .sidebar { background: #f7f7f8; }
+  .messages { background: #fff; }
+  .bubble { box-shadow: none; }
+  .msg.bot .bubble { border-color: transparent; }
+  .topbar button { white-space: nowrap; }
+  .ops-card input, .ops-card select {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--line);
+    border-radius: 9px; background: #fff; font: inherit;
+  }
   .login-card { width: min(100%, 390px); background: var(--panel); padding: 28px;
     border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }
   .login-card h1 { font-size: 20px; margin: 0 0 6px; }
@@ -350,6 +368,13 @@
       <div id="uploadMsg" class="side-foot" style="border:0;padding:8px 2px"></div>
     </div>
     <div class="side-foot">
+      <span class="badge" id="userBadge">未登录</span>
+      <div class="account-actions">
+        <button class="ghost" id="opsBtn" type="button" hidden>管理中心</button>
+        <button class="ghost" id="usersBtn" type="button" hidden>管理用户</button>
+        <button class="ghost" id="passwordBtn" type="button">修改密码</button>
+        <button class="ghost" id="logoutBtn" type="button">退出</button>
+      </div>
       <div id="health">正在检查服务…</div>
     </div>
   </aside>
@@ -360,11 +385,6 @@
       <span class="title">技术支持助手</span>
       <span class="badge" id="modeBadge">…</span>
       <span class="spacer"></span>
-      <span class="badge" id="userBadge">未登录</span>
-      <button class="ghost" id="opsBtn" type="button" hidden>管理中心</button>
-      <button class="ghost" id="usersBtn" type="button" hidden>管理用户</button>
-      <button class="ghost" id="passwordBtn" type="button">修改密码</button>
-      <button class="ghost" id="logoutBtn" type="button">退出</button>
     </div>
 
     <div class="messages" id="messages">
@@ -661,6 +681,20 @@ function addBot(payload) {
   }
   if (payload.citations && payload.citations.length) body.appendChild(citesBlock(payload.citations));
   if (payload.pending_action) body.appendChild(pendingBlock(payload.pending_action));
+  const nextAction = payload.next_action || ((payload.answer || '').startsWith('点表制作：') ? 'point_table' : null);
+  if (nextAction) {
+    const action = document.createElement('button'); action.className = 'ghost'; action.type = 'button';
+    action.textContent = nextAction === 'point_table' ? '上传协议并制作点表' : '填写工具参数';
+    action.onclick = () => {
+      if (state.busy) return;
+      if (nextAction === 'point_table') {
+        showPointTableForm();
+        if ((payload.answer || '').startsWith('点表制作：北向')) $('ptDirection').value = 'north';
+      }
+      else if (typeof openEngineeringForm === 'function') openEngineeringForm(nextAction);
+    };
+    body.appendChild(action);
+  }
   if (payload.message_id) body.appendChild(feedbackBlock(payload.message_id));
   el.innerHTML = '<div class="avatar">AI</div>';
   el.appendChild(body);
@@ -895,6 +929,8 @@ async function send(text) {
     });
     wrap.appendChild(preview);
   } else addUser(caption);
+  if (!explicitText) { input.value = ''; clearImageDrafts(); autoGrow(); }
+  const sentSession = state.sessionId;
   addTyping();
   try {
     const body = new FormData();
@@ -903,7 +939,6 @@ async function send(text) {
     if (state.sessionId) body.append('session_id', state.sessionId);
     const result = await api('/input', { method: 'POST', body });
     clearTyping();
-    if (!explicitText) { input.value = ''; clearImageDrafts(); autoGrow(); }
     if (result.kind === 'quiz') addQuizResult(result.quiz);
     else {
       rememberSession(result.chat.session_id);
@@ -914,7 +949,19 @@ async function send(text) {
     $('hint').textContent = '已发送';
   } catch (e) {
     clearTyping();
-    addBot({ status: 'failed', answer: '发送失败：' + e.message + '。图片和文字已保留，可修改后重试。' });
+    const failed = addBot({ status: 'failed', answer: '发送失败：' + e.message + '。可点击下方按钮恢复内容后重试。' });
+    const retry = document.createElement('button'); retry.className = 'ghost'; retry.type = 'button';
+    retry.textContent = '恢复内容重试';
+    retry.onclick = function () {
+      if (state.busy) return;
+      if (state.sessionId !== sentSession) { $('hint').textContent = '请回到原会话后重试'; return; }
+      if (input.value.trim() || state.pendingImages.length) {
+        $('hint').textContent = '输入框已有新内容，请先发送或清空，再恢复失败消息'; return;
+      }
+      input.value = caption; queueImages(images.map(item => item.file)); autoGrow(); input.focus();
+      $('hint').textContent = '内容已恢复，可修改后点击发送';
+    };
+    failed.querySelector('.bubble').appendChild(retry);
   } finally {
     state.busy = false; $('sendBtn').disabled = false; $('quizBtn').disabled = false;
     input.disabled = false; $('newBtn').disabled = false; renderImageDrafts(); input.focus();
@@ -945,6 +992,20 @@ async function restoreLastConversation() {
   const latest = (items || []).find(item => item.user_id === owner);
   if (latest) await openSession(latest.id, true);
   else showEmpty();
+}
+async function createConversation() {
+  if (state.busy) return;
+  state.busy = true; $('newBtn').disabled = true;
+  try {
+    const owner = state.userId;
+    const session = await api('/sessions', { method: 'POST' });
+    if (owner !== state.userId) return;
+    clearImageDrafts(); input.value = ''; autoGrow();
+    rememberSession(session.id); showEmpty();
+    await loadSessions();
+    input.focus(); closeHistorySidebar();
+  } catch (error) { $('hint').textContent = '新建会话失败：' + error.message; }
+  finally { state.busy = false; $('newBtn').disabled = false; }
 }
 async function loadSessions(offset = 0) {
   const owner = state.userId;
@@ -994,6 +1055,7 @@ async function openSession(id, quiet = false) {
       if (message.role === 'user') addUser(message.content, message.images || []);
       else addBot({ answer: message.content, citations: message.citations || [], message_id: message.id });
     });
+    if (!session.messages.length) showEmpty();
     await loadSessions();
     return true;
   } catch (error) {
@@ -1037,15 +1099,7 @@ input.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 input.addEventListener('input', autoGrow);
-$('newBtn').onclick = function () {
-  if (state.busy) return;
-  clearImageDrafts();
-  rememberSession(null);
-  showEmpty();
-  loadSessions();
-  input.focus();
-  closeHistorySidebar();
-};
+$('newBtn').onclick = createConversation;
 function closeHistorySidebar() {
   $('appRoot').classList.remove('history-open');
   $('historyToggle').setAttribute('aria-expanded', 'false');
@@ -1419,6 +1473,7 @@ showEmpty();
 checkHealth();
 api('/auth/me').then(showApp).catch(showLogin);
 </script>
-<script src="/static/service-workbench.js?v=1.12.0"></script>
+<script src="/static/service-workbench.js?v=1.14.1"></script>
+<script src="/static/engineering-tools.js?v=1.14.1"></script>
 </body>
 </html>

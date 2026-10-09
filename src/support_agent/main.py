@@ -594,7 +594,8 @@ async def unified_input(
         return UnifiedInputResponse(kind="quiz", recognized_text=recognized, quiz=result)
     if recognized:
         try:
-            prepared_texts = [prepare_screenshot_question(text) for text in image_texts]
+            prepared_texts = [prepare_screenshot_question(text, user_question=prompt)
+                              for text in image_texts]
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         prepared = prepared_texts[0] if len(prepared_texts) == 1 else (
@@ -625,6 +626,17 @@ async def save_input_images(db: AsyncSession, message_id: str | None,
 LimitQuery = Annotated[int, Query(ge=1, le=100)]
 OffsetQuery = Annotated[int, Query(ge=0)]
 DatasetPathQuery = Annotated[str, Query(description="评测数据集 JSONL 文件路径")]
+
+
+@app.post("/sessions", response_model=SessionSummary, status_code=201)
+async def create_session(db: DbDep, user: AuthenticatedUser,
+                         x_user_id: UserHeader = "demo-user") -> SessionSummary:
+    conversation = Conversation(user_id=user.id if user else x_user_id)
+    db.add(conversation)
+    await db.commit()
+    await db.refresh(conversation)
+    return SessionSummary(id=conversation.id, user_id=conversation.user_id,
+                          created_at=conversation.created_at, title="新对话")
 
 
 @app.get("/sessions", response_model=SessionListResponse)

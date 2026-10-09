@@ -13,7 +13,7 @@ class Element {
   focus() {}
 }
 const ids = {};
-let requests = [], fail = false, objectId = 0;
+let requests = [], fail = false, objectId = 0, failedMessage;
 const context = {
   state: {pendingImages:[], sessionId:null, busy:false},
   $: id => ids[id] ||= new Element(),
@@ -22,12 +22,14 @@ const context = {
   URL: {createObjectURL:()=>`blob:${++objectId}`, revokeObjectURL:()=>{}},
   FormData: class { constructor(){this.entries=[];} append(...pair){this.entries.push(pair);} },
   api: async (path, options) => {
+    assert.equal(context.input.value,'');
+    assert.equal(context.state.pendingImages.length,0);
     requests.push({path, entries:options.body.entries});
     if(fail) throw new Error('模拟网络故障');
     return {kind:'chat', recognized_text:'联合识别文字', chat:{session_id:'s1',answer:'回答'}};
   },
   addUser:()=>{}, addTyping:()=>{}, clearTyping:()=>{},
-  addBot:()=>new Element(), addRecognitionEdit:()=>{}, addQuizResult:()=>{},
+  addBot:()=>{failedMessage=new Element();return failedMessage;}, addRecognitionEdit:()=>{}, addQuizResult:()=>{},
   loadSessions:()=>{}, autoGrow:()=>{}, esc:s=>s,
   rememberSession:id=>{context.state.sessionId=id;},
 };
@@ -53,7 +55,11 @@ const picture=n=>({name:n+'.png',type:'image/png',size:50});
   assert.equal(context.state.pendingImages.length,0);assert.equal(context.input.value,'');
   context.queueImages([picture('retry')]);context.input.value='重试文字';fail=true;
   await context.send();
-  assert.equal(context.state.pendingImages.length,1);assert.equal(context.input.value,'重试文字');
+  assert.equal(context.state.pendingImages.length,0);assert.equal(context.input.value,'');
   assert.equal(context.state.busy,false);
-  console.log('图片粘贴暂存、移除、统一发送、失败保留：全部通过');
+  const retry=failedMessage.querySelector('.bubble').children[0];
+  context.input.value='新的问题';retry.onclick();assert.equal(context.input.value,'新的问题');
+  context.input.value='';retry.onclick();
+  assert.equal(context.state.pendingImages.length,1);assert.equal(context.input.value,'重试文字');
+  console.log('发送立即清空、失败可恢复重试、不覆盖新草稿：全部通过');
 })().catch(error=>{console.error(error);process.exitCode=1;});

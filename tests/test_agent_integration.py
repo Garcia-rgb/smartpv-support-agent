@@ -379,6 +379,8 @@ async def test_remote_model_is_called_through_chat_with_tools(
         "calculator",
         "query_device",
         "search_knowledge_base",
+        "modbus_parse",
+        "register_decode",
     }
 
 

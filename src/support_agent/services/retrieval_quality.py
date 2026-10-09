@@ -57,12 +57,18 @@ def query_variants(query: str) -> list[str]:
     for pattern, canonical, _ in TOPICS:
         if pattern.search(query):
             variants.append(" ".join(brands + [canonical]))
+    if re.search(r"平台|实时信息|实时数据|组串|电压|电流|数据.*不对|值有问题", query):
+        variants = [query, "平台 实时数据 设备信息 数据查询 指标关联",
+                    "平台 数据异常 点表 寄存器 倍率 字序"]
     return list(dict.fromkeys(variants))[:3]
 
 
 def identity_adjustment(query: str, content: str) -> float:
     wanted, found = set(product_models(query)), set(product_models(content))
     score = 0.12 if wanted & found else 0.0
+    if re.search(r"平台|实时信息|实时数据|值有问题|数据.*不对", query):
+        if re.search(r"实时数据|设备信息|数据查询|指标关联", content):
+            score += .14
     # A different exact model remains visible as a weaker, explicitly limited source.
     if wanted and found and not wanted & found:
         score -= 0.12

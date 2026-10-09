@@ -1,13 +1,15 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.12.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.14.1-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
 面向光伏服务人员的技术支持工具，集中处理 **现场问题排查、课程刷题讲解和点表制作**。
 支持文字输入、上传或粘贴截图，并提供 admin / user 账号、资料管理和本机备份。
 
-当前版本 **v1.12.0**，适合在 Windows 本机试用和逐步补充业务资料。企业运行框架已搭建，回答质量与协议解析仍需结合实际资料和现场结果验收。
+Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；管理功能在遮罩窗口内打开。新建会话立即保存到数据库。
+
+当前版本 **v1.14.1**，适合在 Windows 本机试用和逐步补充业务资料。企业运行框架已搭建，回答质量与协议解析仍需结合实际资料和现场结果验收。
 
 图片可连续粘贴或多选上传，暂存预览后点击发送；最多6张，逐张本机识图整理后合并分析。发送失败保留草稿。
 
@@ -101,7 +103,7 @@ PRIVACY_ROUTING_ENABLED=true
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/create_admin.py --generate
-.\.venv\Scripts\python.exe scripts/start_client.py
+.\.venv\Scripts\python.exe scripts/start_desktop.py
 ```
 
 记下首次显示的 admin 密码，登录后修改密码。已有 admin 时，创建脚本不会覆盖账号或密码。
@@ -186,3 +188,13 @@ admin 可在管理中心创建和下载 SQLite 在线快照与资料备份。恢
 检索保留原问题的型号与厂家，同时补充故障术语；未知型号可召回通用核查资料，模型提示明确禁止据此认定专用参数适用。多轮候选去重排序后，最多选4个片段（单来源最多2个），总资料预算6000字符；引用对应实际选用资料。
 
 运行 `python scripts/evaluate_retrieval.py --output 本地文档/检索评测.json` 使用当前资料库执行7条固定检索用例。脚本只读本机资料，不调用模型或联网。指标检查相关资料是否进入可用依据，不代表最终回答正确率；模型回答与现场效果需另外验收。
+
+### 工程工具与业务 Skill
+
+聊天支持本机Modbus报文解析与寄存器解码，提供明确参数表单；缺少字序或乘除含义时先确认。点表制作与现场排查各有项目内业务Skill，实际驱动上传校验流程及模型回答规范。工具不连接或控制设备。示例和限制见 [工程工具与业务Skill](docs/engineering_tools_and_skills.md)。
+
+### 桌面客户端
+
+安装 `pip install -e ".[desktop,quiz,semantic]"` 后运行 `python scripts/start_desktop.py`。Windows 使用 WebView2，需已安装其 Runtime；客户端复用当前版本的本机服务，否则启动可用端口，关闭窗口时停止自己启动的服务。运行 `scripts/setup_client.ps1` 可安装依赖并建立桌面入口。浏览器入口仍可用于兼容和调试。
+
+平台问题允许提供标明为通用核查的只读排查建议，具体菜单、参数及故障结论仍须资料或现场验证。截图数值按空间行保留，列归属不明时不会猜测 PV 对应关系。

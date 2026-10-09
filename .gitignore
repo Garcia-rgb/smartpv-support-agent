@@ -30,3 +30,4 @@ build/
 /.logs/
 /recovery/
 /本地文档/
+.desktop/
