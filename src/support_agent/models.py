@@ -80,6 +80,17 @@ class MessageImage(Base):
     data: Mapped[bytes] = mapped_column(LargeBinary)
 
 
+class InputReceipt(Base):
+    """Durable input deduplication; an uncertain execution is never replayed."""
+
+    __tablename__ = "input_receipts"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), default="started")
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class DocumentChunk(Base):
     """文档切分后的可检索片段及其向量。"""
 

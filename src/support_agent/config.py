@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 各向量后端的默认维度。放在配置层是为了让「维度」只有一处定义：
@@ -59,6 +60,10 @@ class Settings(BaseSettings):
     agent_max_rounds: int = 5
     # 注入给模型的历史消息条数上限，避免长会话把提示词越堆越大。
     chat_history_limit: int = 10
+    input_timeout_seconds: float = Field(default=120, gt=0, le=600)
+    automatic_backup_enabled: bool = True
+    automatic_backup_interval_hours: float = Field(default=24, ge=1, le=8760)
+    automatic_backup_keep: int = Field(default=7, ge=1, le=365)
 
     @property
     def llm_enabled(self) -> bool:

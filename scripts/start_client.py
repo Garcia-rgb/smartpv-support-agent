@@ -24,7 +24,8 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 # 必须以项目根为工作目录：默认 SQLite 路径、.env 都是相对路径，否则会读到别处的库。
-os.chdir(ROOT)
+DATA_ROOT = Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)).resolve()
+os.chdir(DATA_ROOT)
 sys.path.insert(0, str(ROOT / "src"))
 
 HOST = "127.0.0.1"
@@ -53,7 +54,7 @@ def reachable(host: str, port: int, timeout: float = 2.5) -> bool:
 
 def corpus_summary() -> str:
     """不导入应用，直接读 SQLite 汇报语料规模，避免为了打印一行信息付出启动代价。"""
-    database = ROOT / "support_agent.db"
+    database = DATA_ROOT / "support_agent.db"
     if not database.exists():
         return "本地知识库为空（还没有导入任何文档）"
     try:

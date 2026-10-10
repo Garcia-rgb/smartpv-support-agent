@@ -11,29 +11,37 @@ from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
+DATA_ROOT = Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)).resolve()
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / ".localdeps")]
 
 
-def ready_version(url: str) -> str | None:
+def ready_version(url: str, instance: str | None = None) -> str | None:
     try:
         opener = build_opener(ProxyHandler({}))
         with opener.open(url + "/ready", timeout=1) as response:
             payload = json.load(response)
-        return payload.get("version") if payload.get("status") == "ready" else None
+        return payload.get("version") if payload.get("status") == "ready" and (
+            instance is None or payload.get("instance") == instance
+        ) else None
     except (OSError, ValueError):
         return None
 
 
 def main() -> int:
-    os.chdir(ROOT)
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    os.chdir(DATA_ROOT)
     import webview
     from start_client import HOST, pick_port, reachable
 
     from support_agent import __version__
+    from support_agent.config import get_settings
+    from support_agent.services.runtime_identity import runtime_identity
+
+    instance = runtime_identity(get_settings())
 
     server = None
     url = f"http://{HOST}:8000"
-    if ready_version(url) != __version__:
+    if ready_version(url, instance) != __version__:
         import uvicorn
 
         from support_agent.main import app
@@ -46,12 +54,12 @@ def main() -> int:
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         deadline = time.monotonic() + 45
-        while ready_version(url) != __version__:
+        while ready_version(url, instance) != __version__:
             if not thread.is_alive() or time.monotonic() > deadline:
                 server.should_exit = True
                 raise RuntimeError("本机服务启动失败，请查看 .logs/desktop.log。")
             time.sleep(.25)
-    profile = ROOT / ".desktop" / "profile"
+    profile = DATA_ROOT / ".desktop" / "profile"
     profile.mkdir(parents=True, exist_ok=True)
     webview.settings["ALLOW_DOWNLOADS"] = True
     window = webview.create_window(
@@ -74,11 +82,27 @@ def main() -> int:
             pass
 
     window.events.loaded += loaded
+    stopping = threading.Event()
+
+    def watch_service():
+        nonlocal server, thread
+        restarts = 0
+        while not stopping.wait(2):
+            if server and not thread.is_alive() and restarts < 3:
+                restarts += 1
+                print("Local service exited; restarting", restarts)
+                server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, access_log=False))
+                thread = threading.Thread(target=server.run, daemon=True)
+                thread.start()
+
+    if server:
+        threading.Thread(target=watch_service, daemon=True).start()
     try:
         # Authentication and authorization remain in the local API. No Python
         # bridge is exposed to page JavaScript.
         webview.start(gui="edgechromium", private_mode=False, storage_path=str(profile))
     finally:
+        stopping.set()
         if server:
             server.should_exit = True
             thread.join(timeout=5)
@@ -90,13 +114,28 @@ if __name__ == "__main__":
 
     try:
         if sys.stdout is None or sys.stderr is None:
-            log_dir = ROOT / ".logs"
+            log_dir = DATA_ROOT / ".logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             stream = (log_dir / "desktop.log").open("a", encoding="utf-8", buffering=1)
             sys.stdout = sys.stderr = stream
-        raise SystemExit(main())
+        from contextlib import ExitStack
+
+        from support_agent.services.file_lock import file_lock
+
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(file_lock(DATA_ROOT / ".desktop" / "instance.lock"))
+            except OSError as exc:
+                if getattr(exc, "errno", None) in {13, 11}:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(
+                        0, "客户端已打开，请使用现有窗口。", "光伏技术支持", 0,
+                    )
+                    raise SystemExit(0) from exc
+                raise
+            raise SystemExit(main())
     except Exception:
-        log = ROOT / ".logs" / "desktop.log"
+        log = DATA_ROOT / ".logs" / "desktop.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(traceback.format_exc(), encoding="utf-8")
         if sys.platform == "win32":

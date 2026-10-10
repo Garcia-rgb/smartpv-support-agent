@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-os.chdir(ROOT)
+os.chdir(Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)).resolve())
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / ".localdeps")]
 
 from support_agent.config import get_settings  # noqa: E402

@@ -447,7 +447,7 @@ async function api(path, options) {
     let detail = 'HTTP ' + res.status;
     try { const j = await res.json(); if (j && j.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch (e) {}
     if (res.status === 401 && path !== '/auth/login' && path !== '/auth/me') showLogin();
-    throw new Error(detail);
+    const error = new Error(detail); error.status = res.status; throw error;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -881,6 +881,7 @@ function renderImageDrafts() {
     remove.textContent = '移除 ' + (index + 1); remove.disabled = state.busy;
     remove.onclick = () => {
       if (state.busy) return;
+      state.retryInput = null;
       URL.revokeObjectURL(item.url); state.pendingImages.splice(index, 1); renderImageDrafts();
     };
     card.append(img, remove); cards.appendChild(card);
@@ -888,10 +889,12 @@ function renderImageDrafts() {
   box.appendChild(cards);
 }
 function clearImageDrafts() {
+  state.retryInput = null;
   state.pendingImages.forEach(item => URL.revokeObjectURL(item.url));
   state.pendingImages = []; renderImageDrafts();
 }
 function queueImages(files) {
+  state.retryInput = null;
   if (state.busy) { $('hint').textContent = '正在处理，请等待完成后再添加图片'; return; }
   let note = '';
   for (const file of files) {
@@ -908,10 +911,13 @@ function queueImages(files) {
   $('hint').textContent = note || '图片已暂存，可以继续添加图片或文字，点击发送后提交';
   input.focus();
 }
-async function send(text) {
+async function send(text, retryKey) {
   const explicitText = text !== undefined;
   const caption = (explicitText ? text : input.value).trim();
   const images = explicitText ? [] : [...state.pendingImages];
+  const requestKey = retryKey || (!explicitText && state.retryInput?.key) ||
+    (globalThis.crypto?.randomUUID?.() || Date.now().toString(16) + Math.random().toString(16).slice(2));
+  if (!explicitText) state.retryInput = null;
   if ((!caption && !images.length) || state.busy) return;
   state.busy = true; $('sendBtn').disabled = true; $('quizBtn').disabled = true;
   input.disabled = true; $('newBtn').disabled = true; renderImageDrafts();
@@ -937,7 +943,8 @@ async function send(text) {
     if (caption) body.append('message', caption);
     images.forEach(item => body.append('files', item.file));
     if (state.sessionId) body.append('session_id', state.sessionId);
-    const result = await api('/input', { method: 'POST', body });
+    $('hint').textContent = images.length ? '正在识别图片并检索资料…' : '正在检索资料并分析…';
+    const result = await api('/input', { method: 'POST', body, headers: { 'X-Request-Id': requestKey } });
     clearTyping();
     if (result.kind === 'quiz') addQuizResult(result.quiz);
     else {
@@ -959,6 +966,7 @@ async function send(text) {
         $('hint').textContent = '输入框已有新内容，请先发送或清空，再恢复失败消息'; return;
       }
       input.value = caption; queueImages(images.map(item => item.file)); autoGrow(); input.focus();
+      if (!e.status || e.status >= 500 || e.status === 409) state.retryInput = {key: requestKey};
       $('hint').textContent = '内容已恢复，可修改后点击发送';
     };
     failed.querySelector('.bubble').appendChild(retry);
@@ -1098,7 +1106,7 @@ input.addEventListener('paste', function (e) {
 input.addEventListener('keydown', function (e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
-input.addEventListener('input', autoGrow);
+input.addEventListener('input', function () { state.retryInput = null; autoGrow(); });
 $('newBtn').onclick = createConversation;
 function closeHistorySidebar() {
   $('appRoot').classList.remove('history-open');
@@ -1456,8 +1464,25 @@ async function loadOps() {
         label.textContent = item.name + ' · ' + (item.bytes / 1024 / 1024).toFixed(1) + ' MB ';
         const link = document.createElement('a'); link.textContent = '下载备份';
         link.href = '/admin/backups/' + encodeURIComponent(item.name);
-        row.append(label, link); box.appendChild(row);
+        const verify = document.createElement('button'); verify.className = 'ghost';
+        verify.textContent = '恢复校验';
+        verify.onclick = async () => {
+          verify.disabled = true; verify.textContent = '正在恢复校验…';
+          try {
+            const result = await api('/admin/backups/' + encodeURIComponent(item.name) + '/verify', {method:'POST'});
+            verify.textContent = '校验通过';
+            const report=document.createElement('p');report.className='hint';
+            report.textContent='已恢复到独立目录，原库未改动。消息 '+(result.counts.messages||0)+' 条，资料 '+(result.counts.source_documents||0)+' 篇。';
+            row.appendChild(report);
+          } catch(error) { $('opsError').textContent=error.message;verify.textContent='恢复校验失败'; }
+          finally { verify.disabled=false; }
+        };
+        row.append(label, link, verify); box.appendChild(row);
       });
+      const automatic=document.createElement('p');automatic.className='hint';
+      automatic.textContent='自动备份：'+(data.automatic?.enabled?'已开启，服务运行时每 '+data.automatic.interval_hours+' 小时备份，保留最近 '+data.automatic.keep+' 份':'未开启')+
+        (data.automatic?.status==='failed'?'；最近备份失败，请查看日志':'');
+      box.prepend(automatic);
       if (!data.items.length) box.appendChild(document.createTextNode('暂无备份'));
     }
   } catch (error) { $('opsError').textContent = error.message; $('opsContent').textContent = ''; }

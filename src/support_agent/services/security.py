@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import time
 from typing import Any
 
@@ -71,4 +72,6 @@ SUSPICIOUS_PATTERNS = (
 def looks_like_prompt_injection(text: str) -> bool:
     """用简单关键词识别明显的提示词注入；生产环境需要更完整的防护。"""
     lowered = text.lower()
-    return any(pattern in lowered for pattern in SUSPICIOUS_PATTERNS)
+    return any(pattern in lowered for pattern in SUSPICIOUS_PATTERNS) or bool(
+        re.search(r"忽略.{0,8}(?:指令|规则)|(?:输出|泄露|告诉我).{0,8}(?:系统提示词|密钥)", text)
+    )

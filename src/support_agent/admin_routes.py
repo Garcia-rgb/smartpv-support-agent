@@ -23,8 +23,10 @@ from .models import (
     UserAccount,
 )
 from .services.auth import admin_user
+from .services.automatic_backup import automatic_backup, backup_state
 from .services.backups import BackupError, backup_path, create_backup, list_backups
 from .services.cache import get_retrieval_cache
+from .services.restore_drill import restore_drill
 
 router = APIRouter(prefix="/admin", tags=["管理中心"])
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -125,7 +127,16 @@ async def audit(db: DB, admin: Admin, limit: Limit = 25, offset: Offset = 0) -> 
 
 @router.get("/backups")
 async def backups(settings: Config, admin: Admin) -> dict:
-    return {"items": await run_in_threadpool(list_backups, settings)}
+    return {"items": await run_in_threadpool(list_backups, settings),
+            "automatic": {"enabled": settings.automatic_backup_enabled,
+                          "interval_hours": settings.automatic_backup_interval_hours,
+                          "keep": settings.automatic_backup_keep,
+                          **await run_in_threadpool(backup_state, settings)}}
+
+
+@router.post("/backups/automatic")
+async def run_automatic_backup(settings: Config, admin: Admin) -> dict:
+    return await run_in_threadpool(automatic_backup, settings, force=True)
 
 
 @router.post("/backups", status_code=201)
@@ -148,3 +159,15 @@ async def download_backup(name: str, settings: Config, admin: Admin) -> FileResp
         raise HTTPException(404, str(exc)) from exc
     return FileResponse(path, media_type="application/zip", filename=name,
                         headers={"Cache-Control": "no-store"})
+
+
+@router.post("/backups/{name}/verify")
+async def verify_backup(name: str, db: DB, settings: Config, admin: Admin) -> dict:
+    try:
+        result = await run_in_threadpool(restore_drill, settings, name)
+    except (BackupError, OSError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.add(AuditLog(actor=admin.id, action="backup_restore_verified", resource=name,
+                    detail={"counts": result["counts"]}))
+    await db.commit()
+    return result

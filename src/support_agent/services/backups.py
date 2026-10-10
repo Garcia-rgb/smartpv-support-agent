@@ -53,7 +53,7 @@ def list_backups(settings: Settings) -> list[dict]:
             if NAME_RE.fullmatch(p.name) and p.is_file() and not p.is_symlink()]
 
 
-def create_backup(settings: Settings) -> dict:
+def create_backup(settings: Settings, *, kind: str = "manual") -> dict:
     database = database_path(settings)
     folder = Path(settings.backup_dir).resolve()
     source = Path(settings.knowledge_base_dir).resolve()
@@ -65,7 +65,8 @@ def create_backup(settings: Settings) -> dict:
     name = f"backup-{stamp}-{uuid.uuid4().hex[:8]}.zip"
     target = folder / name
     partial = target.with_suffix(".partial")
-    manifest = {"format": 1, "version": __version__, "created_at": stamp, "files": {}}
+    manifest = {"format": 1, "version": __version__, "created_at": stamp,
+                "kind": kind, "files": {}}
     try:
         with tempfile.TemporaryDirectory(dir=folder) as temp:
             snapshot = Path(temp) / "database.sqlite"

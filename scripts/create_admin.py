@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 ROOT = Path(__file__).resolve().parents[1]
-os.chdir(ROOT)
+os.chdir(Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)).resolve())
 sys.path.insert(0, str(ROOT / "src"))
 
 from support_agent.db import SessionFactory, create_schema  # noqa: E402

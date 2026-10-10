@@ -24,8 +24,8 @@ const context = {
   api: async (path, options) => {
     assert.equal(context.input.value,'');
     assert.equal(context.state.pendingImages.length,0);
-    requests.push({path, entries:options.body.entries});
-    if(fail) throw new Error('模拟网络故障');
+    requests.push({path, entries:options.body.entries, headers:options.headers});
+    if(fail) {const error=new Error('模拟服务故障');error.status=503;throw error;}
     return {kind:'chat', recognized_text:'联合识别文字', chat:{session_id:'s1',answer:'回答'}};
   },
   addUser:()=>{}, addTyping:()=>{}, clearTyping:()=>{},
@@ -37,7 +37,7 @@ context.wrap.querySelector=()=>null;
 vm.createContext(context);
 vm.runInContext(html.slice(html.indexOf('const MAX_PENDING_IMAGES'),html.indexOf('function autoGrow()')),context);
 const bindingStart=html.indexOf("$('sendBtn').onclick =");
-vm.runInContext(html.slice(bindingStart,html.indexOf("input.addEventListener('input', autoGrow);",bindingStart)),context);
+vm.runInContext(html.slice(bindingStart,html.indexOf("input.addEventListener('input',",bindingStart)),context);
 const picture=n=>({name:n+'.png',type:'image/png',size:50});
 (async()=>{
   let prevented=false;
@@ -61,5 +61,8 @@ const picture=n=>({name:n+'.png',type:'image/png',size:50});
   context.input.value='新的问题';retry.onclick();assert.equal(context.input.value,'新的问题');
   context.input.value='';retry.onclick();
   assert.equal(context.state.pendingImages.length,1);assert.equal(context.input.value,'重试文字');
+  const failedKey=requests[1].headers['X-Request-Id'];
+  fail=false;await context.send();
+  assert.equal(requests[2].headers['X-Request-Id'],failedKey);
   console.log('发送立即清空、失败可恢复重试、不覆盖新草稿：全部通过');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,6 +1,6 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.14.1-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.15.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
@@ -9,7 +9,7 @@
 
 Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；管理功能在遮罩窗口内打开。新建会话立即保存到数据库。
 
-当前版本 **v1.14.1**，适合在 Windows 本机试用和逐步补充业务资料。企业运行框架已搭建，回答质量与协议解析仍需结合实际资料和现场结果验收。
+当前版本 **v1.15.0**，提供 Windows 本机桌面客户端、自动备份与恢复校验、离线回答验收和离线安装/升级/回退。适合小范围试用，回答质量与协议解析仍需结合实际资料和现场结果验收。部署步骤见 [本机运行与验收](docs/local_operations.md)。
 
 图片可连续粘贴或多选上传，暂存预览后点击发送；最多6张，逐张本机识图整理后合并分析。发送失败保留草稿。
 

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import re
 import secrets
@@ -79,6 +80,7 @@ from .services.auth import (
     token_hash,
     verify_password,
 )
+from .services.automatic_backup import backup_loop
 from .services.backups import archive_source
 from .services.cache import close_store, get_rate_limiter, get_store
 from .services.evaluation import describe_model, run_evaluation, summarize_layers
@@ -90,6 +92,8 @@ from .services.pointtable import PointTableError, generate_csv, parse_protocol, 
 from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
+from .services.reliable_input import reliable_input
+from .services.runtime_identity import runtime_identity
 from .services.semantic import EmbeddingUnavailableError
 
 
@@ -123,9 +127,19 @@ async def lifespan(_: FastAPI):
     validate_runtime_settings(settings)
     configure_file_logging(settings.log_dir)
     await create_schema()
-    yield
-    # Redis 没配时这是空操作；配了就必须关，否则测试和热重载会攒下一堆连接。
-    await close_store()
+    backup_task = asyncio.create_task(backup_loop(settings)) if (
+        settings.automatic_backup_enabled and settings.database_url.startswith("sqlite")
+    ) else None
+    try:
+        yield
+    finally:
+        if backup_task:
+            backup_task.cancel()
+            try:
+                await backup_task
+            except asyncio.CancelledError:
+                pass
+        await close_store()
 
 
 app = FastAPI(
@@ -518,12 +532,13 @@ async def chat(
 
 
 @app.get("/ready")
-async def ready(db: DbDep) -> dict:
+async def ready(db: DbDep, settings: SettingsDep) -> dict:
     try:
         await db.execute(select(1))
     except Exception as exc:
         raise HTTPException(503, "数据库未就绪") from exc
-    return {"status": "ready", "version": __version__}
+    return {"status": "ready", "version": __version__,
+            "instance": runtime_identity(settings)}
 
 
 @app.post("/input", response_model=UnifiedInputResponse)
@@ -536,6 +551,34 @@ async def unified_input(
     files: Annotated[list[UploadFile] | None, File()] = None,
     message: Annotated[str | None, Form()] = None,
     session_id: Annotated[str | None, Form()] = None,
+    x_request_id: Annotated[str | None, Header()] = None,
+) -> UnifiedInputResponse:
+    uploads = ([file] if file else []) + (files or [])
+    if len(uploads) > 6:
+        raise HTTPException(400, "一次最多发送6张图片")
+    digest = hashlib.sha256()
+    digest.update(((message or "") + "\0" + (session_id or "")).encode())
+    total = 0
+    for upload in uploads:
+        data = await upload.read(settings.max_upload_bytes + 1)
+        total += len(data)
+        if len(data) > settings.max_upload_bytes or total > 20 * 1024 * 1024:
+            raise HTTPException(413, "图片超过大小限制")
+        digest.update((upload.content_type or "").encode() + b"\0")
+        digest.update(hashlib.sha256(data).digest())
+        await upload.seek(0)
+    result = await reliable_input(
+        db, user.id if user else "demo-user", session_id,
+        x_request_id or secrets.token_hex(16), digest.hexdigest(),
+        lambda: process_unified_input(db, settings, response, user, file, files,
+                                     message, session_id),
+        timeout=settings.input_timeout_seconds,
+    )
+    return UnifiedInputResponse.model_validate(result)
+
+
+async def process_unified_input(
+    db, settings, response, user, file=None, files=None, message=None, session_id=None,
 ) -> UnifiedInputResponse:
     """Normalize image/text input, then route clear exam questions to quiz logic."""
     identity = user.id if user else "demo-user"
