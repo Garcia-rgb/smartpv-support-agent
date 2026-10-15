@@ -1,6 +1,6 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.15.2-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.16.0-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
@@ -9,7 +9,7 @@
 
 Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；管理功能在遮罩窗口内打开。新建会话立即保存到数据库。
 
-当前版本 **v1.15.2**，提供 Windows 本机桌面客户端、自动备份与恢复校验、离线回答验收和离线安装/升级/回退。适合小范围试用，回答质量与协议解析仍需结合实际资料和现场结果验收。部署步骤见 [本机运行与验收](docs/local_operations.md)。
+当前版本 **v1.16.0**，提供 Windows 本机桌面客户端、自动备份与恢复校验、离线回答验收和离线安装/升级/回退。适合小范围试用，回答质量与协议解析仍需结合实际资料和现场结果验收。部署步骤见 [本机运行与验收](docs/local_operations.md)。
 
 图片可连续粘贴或多选上传，暂存预览后点击发送；最多6张，逐张本机识图整理后合并分析。发送失败保留草稿。
 
@@ -22,6 +22,10 @@ Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；
 - **点表检查**：生成前列出必填项、数据类型/寄存器宽度、地址重复与重叠、控制点等检查结果，阻止存在确定错误的点表导出。
 
 目前不自动连接现场平台；文件来源和数据采集时间需手动填写。规则检查通过不等于现场验收通过。
+
+## 参数配置
+
+算法参数统一在 [config/agent.toml](config/agent.toml)，实验覆盖放在 `config/experiments/`；密钥和接口配置保留在本机 `.env`。支持参数校验、生效快照和旧配置迁移，详见 [参数管理与实验](docs/tuning.md)。修改后需重启；当前值为运行基线，不代表已验证的最优解。
 
 ## 主要功能
 

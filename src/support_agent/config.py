@@ -1,17 +1,47 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .tuning import BASE_CONFIG, TuningParameters, read_tuning, resolve_tuning_path, tuning_snapshot
 
 # 各向量后端的默认维度。放在配置层是为了让「维度」只有一处定义：
 # models.py 建表、semantic.py 加载模型都读这里，不会各写一个数。
 EMBEDDING_DIMENSIONS = {"hash": 384, "onnx": 512}
 
 
-class Settings(BaseSettings):
+class Settings(BaseSettings, TuningParameters):
     """集中读取应用配置；同名环境变量会覆盖这里的默认值。"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", allow_inf_nan=False)
+    agent_config_file: str | None = None
+    agent_experiment_file: str | None = None
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        selectors = {**dotenv_settings(), **env_settings(), **init_settings()}
+
+        def base():
+            values = read_tuning(BASE_CONFIG)
+            chosen = selectors.get("agent_config_file")
+            path = resolve_tuning_path(chosen) if chosen else Path.cwd() / "config/agent.toml"
+            if chosen or path.exists():
+                if path.resolve() != BASE_CONFIG.resolve():
+                    values.update(read_tuning(path))
+            return values
+
+        def experiment():
+            value = selectors.get("agent_experiment_file")
+            return read_tuning(resolve_tuning_path(value)) if value else {}
+
+        # Explicit constructor/CLI and process environment win. Experiments
+        # override legacy .env algorithm values; .env remains compatible.
+        return init_settings, env_settings, experiment, dotenv_settings, file_secret_settings, base
+
+    def tuning_snapshot(self) -> dict:
+        return tuning_snapshot(self)
 
     app_env: str = "development"
     backup_dir: str = ".backups"
@@ -47,19 +77,9 @@ class Settings(BaseSettings):
     embedding_model_path: str | None = None
     # 留空则按后端取 EMBEDDING_DIMENSIONS 里的默认值。
     embedding_dimension: int | None = None
-    embedding_batch_size: int = 16
-    embedding_max_length: int = 512
     confirmation_secret: str = "development-only-secret"
     max_upload_bytes: int = 5 * 1024 * 1024
-    retrieval_top_k: int = 5
     retrieval_corpus_id: str | None = None
-    retrieval_min_score: float = 0.0
-    chunk_size: int = 700
-    chunk_overlap: int = 100
-    # 单个请求最多允许模型来回几轮；轮数用尽后服务端会禁用工具强制收敛。
-    agent_max_rounds: int = 5
-    # 注入给模型的历史消息条数上限，避免长会话把提示词越堆越大。
-    chat_history_limit: int = 10
     input_timeout_seconds: float = Field(default=120, gt=0, le=600)
     automatic_backup_enabled: bool = True
     automatic_backup_interval_hours: float = Field(default=24, ge=1, le=8760)

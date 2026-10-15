@@ -36,6 +36,7 @@ from xml.etree import ElementTree as ET
 
 from sqlalchemy import select
 
+from support_agent.config import get_settings
 from support_agent.db import SessionFactory, create_schema
 from support_agent.models import DocumentChunk, SourceDocument
 from support_agent.services.cache import get_retrieval_cache
@@ -150,8 +151,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="资料版本，例如 V1.0 / 第3册；默认从标题和文件名里抽，抽不到就留空",
     )
     parser.add_argument("--corpus-id", default=SMARTPV_CORPUS_ID, help="语料库标识")
-    parser.add_argument("--chunk-size", type=int, default=700)
-    parser.add_argument("--chunk-overlap", type=int, default=100)
+    parser.add_argument("--chunk-size", type=int, default=None)
+    parser.add_argument("--chunk-overlap", type=int, default=None)
     parser.add_argument("--include-restricted", action="store_true", help="连受限章节一起导入")
     parser.add_argument("--dry-run", action="store_true", help="只打印章节切分结果，不写库")
     return parser.parse_args(argv)
@@ -159,6 +160,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def main() -> int:
     args = parse_args()
+    settings = get_settings()
+    args.chunk_size = settings.chunk_size if args.chunk_size is None else args.chunk_size
+    args.chunk_overlap = (
+        settings.chunk_overlap if args.chunk_overlap is None else args.chunk_overlap
+    )
+    if not 0 <= args.chunk_overlap < args.chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
     source = args.file.expanduser().resolve()
     if not source.is_file():
         raise SystemExit(f"文件不存在：{source}")

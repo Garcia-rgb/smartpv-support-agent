@@ -20,11 +20,15 @@ def build_package(output: Path, python_root: Path, dependencies: Path, model: Pa
     for folder in ("src", "static", "scripts"):
         entries.extend((p, p.relative_to(ROOT).as_posix()) for p in (ROOT / folder).rglob("*")
                        if p.is_file() and "__pycache__" not in p.parts and not p.is_symlink())
+    for name in ("config/agent.toml", "config/experiments/smaller_chunks.toml",
+                 "config/experiments/longer_context.toml"):
+        entries.append((ROOT / name, name))
     for filename in ("LICENSE", ".env.example", "README.md"):
         entries.append((ROOT / filename, filename))
     entries.append((ROOT / "tests/fixtures/answer_acceptance.json",
                     "scripts/fixtures/answer_acceptance.json"))
     entries.append((ROOT / "docs/local_operations.md", "scripts/INSTALLATION.md"))
+    entries.append((ROOT / "docs/tuning.md", "scripts/TUNING.md"))
     for p in python_root.rglob("*"):
         rel = p.relative_to(python_root)
         if p.is_file() and not p.is_symlink() and not any(

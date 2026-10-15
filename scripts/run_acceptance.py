@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -13,6 +14,8 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / ".localdeps")]
 
 
 async def run(args):
+    from support_agent.desktop_runtime import prefer_python_sqlalchemy
+    prefer_python_sqlalchemy()
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from support_agent import __version__
@@ -37,12 +40,14 @@ async def run(args):
                 await connection.run_sync(Base.metadata.create_all)
         async with async_sessionmaker(engine, expire_on_commit=False)() as db:
             if not args.live_library:
-                rag = RAGService(db)
+                rag = RAGService(db, settings=settings)
                 for document in suite.get("documents", []):
                     await rag.ingest(document["filename"], "text/markdown",
                                      document["text"].encode(), visibility="public")
             report = await run_acceptance(db, suite["cases"], settings, remote=args.remote)
         await engine.dispose()
+    report["tuning"] = settings.tuning_snapshot()
+    report["suite_sha256"] = hashlib.sha256(args.suite.read_bytes()).hexdigest()
     report["version"] = __version__
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -60,6 +65,12 @@ if __name__ == "__main__":
     parser.add_argument("--live-library", action="store_true")
     parser.add_argument("--remote", action="store_true")
     parser.add_argument("--allow-external-data", action="store_true")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--experiment", type=Path)
     args = parser.parse_args()
+    if args.config:
+        os.environ["AGENT_CONFIG_FILE"] = str(args.config.resolve())
+    if args.experiment:
+        os.environ["AGENT_EXPERIMENT_FILE"] = str(args.experiment.resolve())
     os.chdir(Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)))
     raise SystemExit(asyncio.run(run(args)))

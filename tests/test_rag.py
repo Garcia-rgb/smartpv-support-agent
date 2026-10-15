@@ -2,12 +2,12 @@ from hashlib import sha256
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from support_agent.config import get_settings
 from support_agent.models import DocumentChunk, SourceDocument
 from support_agent.services.cache import get_retrieval_cache
 from support_agent.services.embeddings import local_embedding
 from support_agent.services.industry import build_chunk_metadata
 from support_agent.services.rag import (
-    CORPUS_MISSING_MIN_CHUNKS,
     RAGService,
     SearchHit,
     has_unknown_foreign_token,
@@ -161,7 +161,7 @@ async def test_corpus_scope_gate_rejects_out_of_domain(db_session: AsyncSession)
     # 正文刻意含「安装环境」，好让「Python 装环境」的中文部分能对上——
     # 这样它只能被外文词判据拦住，缺比例那条判据在这个例子里够不着阈值。
     body = "逆变器安装环境要求：避免阳光直射。RS485 走屏蔽双绞线，MPPT 跟踪组串电压。"
-    for index in range(CORPUS_MISSING_MIN_CHUNKS + 5):
+    for index in range(get_settings().retrieval_corpus_min_chunks + 5):
         await _add_chunk(db_session, f"pv-{index}.md", body, {"corpus_id": "demo"}, position=index)
 
     # 库内问题照常命中
@@ -190,7 +190,7 @@ async def test_corpus_scope_gate_stays_off_for_small_corpus(db_session: AsyncSes
     assert await rag.corpus_scope_reason("Windows 怎么安装系统", corpus_id="demo") is None
 
     # 补足片段跨过门槛后，同样的问法被拦下——差别只在语料规模。
-    for index in range(CORPUS_MISSING_MIN_CHUNKS + 5):
+    for index in range(get_settings().retrieval_corpus_min_chunks + 5):
         await _add_chunk(
             db_session, f"fill-{index}.md", body, {"corpus_id": "demo"}, position=index
         )
@@ -205,7 +205,7 @@ async def test_corpus_scope_reason_tells_which_gate_fired(db_session: AsyncSessi
     """
     rag = RAGService(db_session)
     body = "逆变器安装环境要求：避免阳光直射。RS485 走屏蔽双绞线，MPPT 跟踪组串电压。"
-    for index in range(CORPUS_MISSING_MIN_CHUNKS + 5):
+    for index in range(get_settings().retrieval_corpus_min_chunks + 5):
         await _add_chunk(db_session, f"pv-{index}.md", body, {"corpus_id": "demo"}, position=index)
 
     # 库内问题：没有原因可报

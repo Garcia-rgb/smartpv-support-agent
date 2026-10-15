@@ -15,6 +15,8 @@ const context={document:{createElement:element,body:element()},state:{busy:false
   wrap:element(),fmt:s=>s,stateBlock:()=>null,scroll:()=>{},
   showPointTableForm:()=>elements.set('ptDirection',element())};
 vm.createContext(context);
+context.window = context;
+vm.runInContext(fs.readFileSync('static/answer-format.js','utf8'),context);
 vm.runInContext(fs.readFileSync('static/engineering-tools.js','utf8'),context);
 assert.equal(context.chipBox.children.length,2);
 context.openEngineeringForm('modbus_parse');

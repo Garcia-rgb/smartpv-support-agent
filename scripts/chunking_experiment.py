@@ -32,6 +32,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -45,7 +46,7 @@ DEFAULT_DATASET = Path(r"D:\资料汇总\拓展资料\检索质量评测.jsonl")
 DEFAULT_EXTRA = (Path(r"D:\资料汇总\拓展资料\第3册-交直流屏柜原理.md"),)
 WORKDIR = Path(".chunking-experiment")
 # 检索 top_k 在这里写死为线上默认值，避免不同 top_k 之间没法比。
-TOP_K = 5
+
 
 
 def load_dataset(path: Path) -> list[dict]:
@@ -79,6 +80,8 @@ async def _worker(
 ) -> None:
     """在子进程里跑一组参数：清空 → 导入 → 逐条检索 → 落 JSON。"""
     # 导入必须放在环境变量设好之后（见模块 docstring）。
+    from support_agent.desktop_runtime import prefer_python_sqlalchemy
+    prefer_python_sqlalchemy()
     from sqlalchemy import func, select
 
     from support_agent.config import Settings
@@ -152,7 +155,9 @@ async def _worker(
         "chunk_size": chunk_size,
         "overlap": overlap,
         "backend": backend.signature,
-        "top_k": TOP_K,
+        "top_k": settings.retrieval_top_k,
+        "tuning": settings.tuning_snapshot(),
+        "suite_sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
         "documents": report.documents_created + extras_used,
         "chunks": int(chunk_count),
         "avg_chunk_chars": round(float(avg_chars), 1),

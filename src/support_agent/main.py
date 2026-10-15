@@ -442,7 +442,7 @@ async def upload_document(
         raise HTTPException(413, "文件超过大小限制")
     try:
         document, chunks, duplicate = await RAGService(
-            db, settings.chunk_size, settings.chunk_overlap
+            db, settings=settings
         ).ingest(filename, file.content_type or "application/octet-stream", data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -482,7 +482,7 @@ async def analyze_quiz(
         raise HTTPException(400, "请上传题目截图或填写识别文字")
     try:
         decision = (
-            await classify_question(raw_text, RAGService(db), settings)
+            await classify_question(raw_text, RAGService(db, settings=settings), settings)
             if settings.privacy_routing_enabled else None
         )
         public = decision is not None and decision.scope == "public"
@@ -830,4 +830,4 @@ if STATIC_DIR is not None:
     @app.get("/", include_in_schema=False)
     async def client() -> FileResponse:
         """返回简易客户端页面。"""
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})

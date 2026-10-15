@@ -11,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 os.chdir(Path(os.environ.get("SUPPORT_AGENT_DATA_DIR", ROOT)))
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / ".localdeps")]
 
+from support_agent.desktop_runtime import prefer_python_sqlalchemy  # noqa: E402
+
+prefer_python_sqlalchemy()
+
 
 async def probe(expected_version=None):
     for name in ("onnxruntime", "rapidocr", "tokenizers", "webview"):

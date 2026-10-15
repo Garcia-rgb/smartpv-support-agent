@@ -90,6 +90,7 @@ packages = ["src/support_agent"]
 # 内置客户端页面：源码里在仓库根的 static/，打进 wheel 后落到包内，
 # 这样 pip 安装到任何环境、从任何工作目录启动都能命中 GET /（见 main.locate_static_dir）。
 "static" = "support_agent/static"
+"config/agent.toml" = "support_agent/defaults/agent.toml"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

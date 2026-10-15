@@ -1,0 +1,8 @@
+# 候选方案；消息数和字符预算都提高，需对比回答质量、耗时与 token 成本。
+[history]
+chat_history_limit = 16
+followup_message_limit = 12
+
+[evidence]
+evidence_total_chars = 9000
+evidence_snippet_chars = 2200

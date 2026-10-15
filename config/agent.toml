@@ -1,0 +1,74 @@
+# 正常运行基线；数值来自当前配置，不代表已经寻得最优解。
+# 安全凭据、模型接口、模型文件路径仍放在本地 .env。
+[chunking]
+chunk_size = 700  # 字符
+chunk_overlap = 100  # 相邻切块重叠字符；必须小于 chunk_size
+
+[retrieval]
+retrieval_top_k = 5  # 最终返回片段数
+retrieval_min_score = 0.0
+retrieval_candidate_min = 12
+retrieval_candidate_multiplier = 3
+retrieval_lexical_weight = 0.3
+retrieval_phrase_weight = 0.35
+retrieval_semantic_weight = 0.35  # 三项权重之和必须为 1
+retrieval_coverage_sharpness = 2.0
+retrieval_corpus_missing_ceiling = 0.6
+retrieval_corpus_min_chunks = 60
+retrieval_metadata_match_bonus = 0.06
+retrieval_metadata_conflict_penalty = 0.1
+retrieval_hash_trust_floor = 0.4
+retrieval_identity_min_score = 0.05
+identity_model_match_bonus = 0.12
+identity_platform_bonus = 0.14
+identity_model_conflict_penalty = 0.12
+identity_brand_match_bonus = 0.04
+identity_brand_conflict_penalty = 0.25
+identity_topic_bonus_cap = 0.12
+identity_topic_term_bonus = 0.04
+identity_address_bonus = 0.18
+identity_communication_bonus = 0.12
+identity_unrelated_control_penalty = 0.15
+identity_alarm_code_bonus = 0.08
+
+[evidence]
+evidence_top_k = 4
+evidence_per_document = 2
+evidence_min_score = 0.2
+evidence_score_ratio = 0.65
+grounded_answer_min_score = 0.35
+evidence_total_chars = 6000  # 资料正文总字符预算，不是 token
+evidence_snippet_chars = 1800  # 单片段字符预算
+
+[history]
+chat_history_limit = 10  # 消息条数，不是对话轮数
+history_message_chars = 2000
+followup_message_limit = 8
+followup_user_chars = 700
+followup_assistant_chars = 800
+followup_query_chars = 3200
+state_feedback_chars = 500
+state_feedback_limit = 5
+
+[embedding]
+embedding_batch_size = 16
+embedding_max_length = 512  # 向量编码器 token 截断长度，不是大模型上下文容量
+
+[generation]
+agent_max_rounds = 5
+llm_temperature = 0.1
+local_llm_max_output_tokens = 384
+llm_max_output_tokens = 0  # 0：不额外指定远程输出上限，沿用提供方设置
+
+[versions]
+conflict_score_ratio = 0.85
+conflict_max_groups = 3
+conflict_excerpts_per_group = 2
+conflict_excerpt_chars = 200
+citation_excerpt_chars = 240
+
+[quiz]
+quiz_search_top_k = 6
+quiz_option_top_k = 2
+quiz_evidence_top_k = 4
+quiz_option_lead = 0.03

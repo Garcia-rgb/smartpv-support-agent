@@ -176,13 +176,11 @@ async def _cache_row(settings: Any) -> Row:
 
 
 def _retrieval_row(settings: Any) -> Row:
-    from .services.rag import CORPUS_MISSING_CEILING, CORPUS_MISSING_MIN_CHUNKS
-
     detail = (
         f"top_k={settings.retrieval_top_k} | min_score={settings.retrieval_min_score}"
         f" | corpus_id={settings.retrieval_corpus_id or '(all)'}"
-        f" | refusal gate: phrase-missing >= {CORPUS_MISSING_CEILING}"
-        f" once corpus has >= {CORPUS_MISSING_MIN_CHUNKS} chunks"
+        f" | refusal gate: phrase-missing >= {settings.retrieval_corpus_missing_ceiling}"
+        f" once corpus has >= {settings.retrieval_corpus_min_chunks} chunks"
     )
     return "retrieval", OK, detail
 

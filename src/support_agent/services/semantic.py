@@ -109,9 +109,15 @@ class OnnxEmbeddingBackend(EmbeddingBackend):
         model_dir: Path,
         dimension: int,
         *,
-        batch_size: int = 16,
-        max_length: int = 512,
+        batch_size: int | None = None,
+        max_length: int | None = None,
     ):
+        if batch_size is None or max_length is None:
+            from ..config import get_settings
+
+            settings = get_settings()
+            batch_size = settings.embedding_batch_size if batch_size is None else batch_size
+            max_length = settings.embedding_max_length if max_length is None else max_length
         # 先查文件再导入依赖：路径写错是最常见的配置问题，不该因为没装 onnxruntime
         # 而报出一个不相干的错，也不该为一次配置检查付出几十兆的导入代价。
         weights = model_dir / ONNX_WEIGHTS_RELATIVE
@@ -216,6 +222,8 @@ def get_embedding_backend(settings=None) -> EmbeddingBackend:
             str(settings.embedding_backend),
             str(settings.embedding_model_path),
             str(settings.vector_dimension),
+            str(settings.embedding_batch_size),
+            str(settings.embedding_max_length),
         ]
     )
     if key not in _BACKENDS:

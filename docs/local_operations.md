@@ -30,4 +30,10 @@
 
 ## 包构建
 
-`python scripts/build_desktop_package.py --output dist/SmartPVSupport-1.15.1-windows.zip`。只复制明确列出的程序、运行时和依赖目录。禁止把实际资料或密钥加入安装包。
+`python scripts/build_desktop_package.py --output dist/SmartPVSupport-1.15.4-windows.zip`。只复制明确列出的程序、运行时和依赖目录。禁止把实际资料或密钥加入安装包。
+
+桌面入口使用 SQLAlchemy 自带的 Python 实现，避免 Windows 可选原生扩展的冷加载等待。慢启动时检查 `.logs/desktop.log`、`.logs/desktop-service.log` 与 `.logs/startup-stacks.log`；最后一项仅记录超过十秒的依赖导入堆栈。`.desktop/startup.json` 与 `service-ready.json` 保存当前启动耗时。单次快速重启不能代表冷启动，诊断应同时记录冷路径对照结果。
+
+## 算法参数
+
+日常配置为 `config/agent.toml`；安装版为 `data/config/agent.toml`，升级保留。实验覆盖、迁移与参数快照见 [参数管理与实验](tuning.md)。

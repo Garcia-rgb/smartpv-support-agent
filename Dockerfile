@@ -14,6 +14,7 @@ COPY src ./src
 # wheel（包内 fallback 路径），构建元数据阶段找不到 static 会让 pip install 直接失败
 # （FileNotFoundError: Forced include not found: /app/static）。
 COPY static ./static
+COPY config ./config
 RUN pip install --no-cache-dir .
 
 # 内置客户端页面：服务按「环境变量 → 仓库布局 → 当前工作目录 → 包内」的顺序查找，

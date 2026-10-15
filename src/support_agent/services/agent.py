@@ -18,7 +18,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..models import AuditLog, Conversation, Message, MessageImage
 from ..schemas import (
     AnswerSource,
@@ -87,13 +87,15 @@ CLARIFICATION_HINTS = [
     "具体现象（故障码 / 出现时的工况 / 涉及的屏柜或回路）",
 ]
 # 单条历史消息最多回填多少字符，避免一次长会话把提示词撑爆。
-HISTORY_MESSAGE_CHARS = 2000
 # 写进审计日志的参数原文长度上限。
 AUDIT_ARGUMENT_CHARS = 500
 
 
-def conversation_context(text: str, history: list[dict[str, str]]) -> tuple[str, str]:
+def conversation_context(
+    text: str, history: list[dict[str, str]], settings: Settings | None = None
+) -> tuple[str, str]:
     """Carry related follow-ups into retrieval; suggestions are never checked facts."""
+    settings = settings or get_settings()
     if not history or re.search(r"新问题|换个问题|另一个问题|不说这个", text):
         return text, text
     followup = bool(
@@ -106,10 +108,18 @@ def conversation_context(text: str, history: list[dict[str, str]]) -> tuple[str,
     ) or (len(text.strip()) <= 35 and not re.search(r"怎么|如何|是什么|怎么办", text))
     if not followup:
         return text, text
-    recent = history[-8:]
-    facts = [normalize_issue_input(m["content"])[:700] for m in recent if m["role"] == "user"]
-    reference = [m["content"][:800] for m in recent if m["role"] == "assistant"]
-    retrieval = "\n".join(facts + [text])[-3200:]
+    recent = history[-settings.followup_message_limit :]
+    facts = [
+        normalize_issue_input(m["content"])[: settings.followup_user_chars]
+        for m in recent
+        if m["role"] == "user"
+    ]
+    reference = [
+        m["content"][: settings.followup_assistant_chars]
+        for m in recent
+        if m["role"] == "assistant"
+    ]
+    retrieval = "\n".join(facts + [text])[-settings.followup_query_chars :]
     question = (
         "同一对话的连续追问。结合已反馈结果回答当前问题，避免重复已做且无效的检查。\n"
         "此前用户描述与反馈（仅用户明确确认的结果视为事实）：\n"
@@ -119,7 +129,7 @@ def conversation_context(text: str, history: list[dict[str, str]]) -> tuple[str,
         + "\n当前问题：\n"
         + text
     )
-    if state := issue_state(text, history):
+    if state := issue_state(text, history, settings):
         question = state + "\n\n" + question
     return retrieval, question
 
@@ -200,7 +210,7 @@ class SupportAgent:
     def __init__(self, db: AsyncSession, settings: Settings, model: object | None = None) -> None:
         self.db = db
         self.settings = settings
-        self.rag = RAGService(db, settings.chunk_size, settings.chunk_overlap)
+        self.rag = RAGService(db, settings=settings)
         self.llm = OpenAICompatibleClient(settings)
         self.local_llm = OpenAICompatibleClient(settings, local=True)
         # 隐私分流启用后，旧 Agent Loop 只能用本地模型处理结构化工具请求。
@@ -219,8 +229,8 @@ class SupportAgent:
         question = question or text
         decision = await classify_question(text, self.rag, self.settings)
         if decision.scope == "public":
-            hits = self.evidence_hits(decision.public_hits)
-            contexts = self.evidence_contexts(question, hits)
+            hits = self.evidence_hits(decision.public_hits, self.settings)
+            contexts = self.evidence_contexts(question, hits, self.settings)
             answer = summarize_local_retrieval(text, hits)
             model = self.llm if self.settings.llm_enabled else self.local_llm
             if model.enabled:
@@ -232,45 +242,52 @@ class SupportAgent:
                 status="completed",
                 answer=answer,
                 answer_source="knowledge",
-                citations=self.rag.citations(hits),
+                citations=self.rag.citations(hits, self.settings),
                 hits=hits,
-                conflicts=self.rag.detect_conflicts(hits),
+                conflicts=self.rag.detect_conflicts(hits, self.settings),
                 privacy_scope="public",
             )
 
         # 内部问题可检索两类资料；按当前用户授权仅发送本次问题和命中片段。
         hits = await self.retrieve(text)
-        if hits and hits[0].score >= 0.35:
-            hits = self.evidence_hits(hits)
+        if hits and hits[0].score >= self.settings.grounded_answer_min_score:
+            hits = self.evidence_hits(hits, self.settings)
             answer = summarize_local_retrieval(text, hits)
             if self.llm.enabled:
                 try:
-                    answer = await self.llm.answer(question, self.evidence_contexts(question, hits))
+                    answer = await self.llm.answer(
+                        question, self.evidence_contexts(question, hits, self.settings)
+                    )
                 except LLMError:
                     pass
             return TurnOutcome(
                 status="completed",
                 answer=answer,
                 answer_source="knowledge",
-                citations=self.rag.citations(hits),
+                citations=self.rag.citations(hits, self.settings),
                 hits=hits,
-                conflicts=self.rag.detect_conflicts(hits),
+                conflicts=self.rag.detect_conflicts(hits, self.settings),
                 privacy_scope="private",
             )
 
         if platform_issue(question):
-            hits = self.evidence_hits(hits)
+            hits = self.evidence_hits(hits, self.settings)
             answer = general_checks()
             status = "completed"
             if self.llm.enabled:
                 try:
-                    answer = await self.llm.answer(question, self.evidence_contexts(question, hits))
+                    answer = await self.llm.answer(
+                        question, self.evidence_contexts(question, hits, self.settings)
+                    )
                 except LLMError:
                     status = "degraded"
             return TurnOutcome(
-                status=status, answer=answer,
+                status=status,
+                answer=answer,
                 answer_source="knowledge" if hits else "model",
-                citations=self.rag.citations(hits), hits=hits, privacy_scope="private",
+                citations=self.rag.citations(hits, self.settings),
+                hits=hits,
+                privacy_scope="private",
             )
 
         safe_query = safe_web_query(text)
@@ -341,6 +358,8 @@ class SupportAgent:
 
     async def _history(self, session_id: str) -> list[dict[str, str]]:
         """读取本会话此前的消息，按时间正序返回给模型当前轮。"""
+        if self.settings.chat_history_limit == 0:
+            return []
         rows = (
             await self.db.scalars(
                 select(Message)
@@ -394,7 +413,7 @@ class SupportAgent:
         if first_user and all(item.id != first_user.id for item in rows):
             rows.append(first_user)
         return [
-            {"role": item.role, "content": item.content[:HISTORY_MESSAGE_CHARS]}
+            {"role": item.role, "content": item.content[: self.settings.history_message_chars]}
             for item in reversed(rows)
         ]
 
@@ -408,7 +427,10 @@ class SupportAgent:
         for variant in query_variants(query):
             candidates = await self.rag.search(
                 variant,
-                max(12, self.settings.retrieval_top_k * 3),
+                max(
+                    self.settings.retrieval_candidate_min,
+                    self.settings.retrieval_top_k * self.settings.retrieval_candidate_multiplier,
+                ),
                 corpus_id=self.settings.retrieval_corpus_id,
                 min_score=self.settings.retrieval_min_score,
             )
@@ -419,8 +441,8 @@ class SupportAgent:
                     h.document,
                     h.score
                     + (
-                        identity_adjustment(query, h.chunk.content)
-                        - identity_adjustment(variant, h.chunk.content)
+                        identity_adjustment(query, h.chunk.content, self.settings)
+                        - identity_adjustment(variant, h.chunk.content, self.settings)
                     ),
                 )
                 for h in candidates
@@ -428,30 +450,41 @@ class SupportAgent:
         return _dedupe_hits(hits, self.settings.retrieval_top_k)
 
     @staticmethod
-    def evidence_hits(hits: list[SearchHit]) -> list[SearchHit]:
+    def evidence_hits(hits: list[SearchHit], settings: Settings | None = None) -> list[SearchHit]:
         """Select bounded evidence from different sources instead of blindly taking two."""
         if not hits:
             return []
-        candidates = [h for h in hits if h.score >= max(0.20, hits[0].score * 0.65)]
+        settings = settings or get_settings()
+        candidates = [
+            h
+            for h in hits
+            if h.score
+            >= max(settings.evidence_min_score, hits[0].score * settings.evidence_score_ratio)
+        ]
         selected, counts = [], {}
         for hit in candidates:
             key = hit.document.id
-            if counts.get(key, 0) >= 2:
+            if counts.get(key, 0) >= settings.evidence_per_document:
                 continue
             selected.append(hit)
             counts[key] = counts.get(key, 0) + 1
-            if len(selected) == 4:
+            if len(selected) == settings.evidence_top_k:
                 break
         return selected
 
     @staticmethod
-    def evidence_contexts(question: str, hits: list[SearchHit]) -> list[str]:
-        contexts, remaining = [], 6000
+    def evidence_contexts(
+        question: str, hits: list[SearchHit], settings: Settings | None = None
+    ) -> list[str]:
+        settings = settings or get_settings()
+        contexts, remaining = [], settings.evidence_total_chars
         for hit in hits:
             prefix = applicability_note(question, hit.chunk.content)
+            if remaining <= len(prefix):
+                break
             # Source names are already visible to the authorized user through citations.
             context = prefix + prepare_evidence_context(
-                hit.chunk.content, min(1800, remaining - len(prefix))
+                hit.chunk.content, min(settings.evidence_snippet_chars, remaining - len(prefix))
             )
             if len(context) > remaining:
                 break
@@ -470,14 +503,15 @@ class SupportAgent:
 
         async def search(query: str) -> str:
             hits = await self.retrieve(query)
-            sink.extend(hits)
             if not hits:
                 return "知识库中没有找到相关依据。请如实告知用户无法回答，不要编造内容。"
+            contexts = self.evidence_contexts(query, hits, self.settings)
+            sink.extend(hits[: len(contexts)])
             blocks: list[str] = []
-            for index, hit in enumerate(hits):
+            for index, (hit, context) in enumerate(zip(hits, contexts, strict=False)):
                 facets = describe_facets(hit.chunk.chunk_metadata or {})
                 label = f"（依据：{facets}）" if facets else ""
-                blocks.append(f"[资料{index + 1}]{label} {hit.chunk.content}")
+                blocks.append(f"[资料{index + 1}]{label} {context}")
             return "\n\n".join(blocks)
 
         return search
@@ -606,7 +640,7 @@ class SupportAgent:
         text = normalize_issue_input(text, include_fields=False)
 
         if self.settings.privacy_routing_enabled and not _local_tool_request(text):
-            retrieval, contextual_question = conversation_context(question, history)
+            retrieval, contextual_question = conversation_context(question, history, self.settings)
             return await self._privacy_knowledge_turn(retrieval, contextual_question)
 
         # 语料范围判定必须前置。实测模型遇到明显跑题的问题（「Python 怎么装环境」）
@@ -646,7 +680,7 @@ class SupportAgent:
             history=history,
         )
         hits = _dedupe_hits(retrieved, self.settings.retrieval_top_k)
-        citations = self.rag.citations(hits)
+        citations = self.rag.citations(hits, self.settings)
         searched = any(record.name == "search_knowledge_base" for record in result.tool_calls)
 
         outcome = TurnOutcome(
@@ -656,7 +690,7 @@ class SupportAgent:
             citations=citations,
             hits=hits,
             # 依据跨版本时并列列出，由用户在客户端按现场版本取舍。
-            conflicts=self.rag.detect_conflicts(hits),
+            conflicts=self.rag.detect_conflicts(hits, self.settings),
             loop=result,
         )
         if result.stopped_reason.startswith("llm_error"):
@@ -681,7 +715,7 @@ class SupportAgent:
             outcome.answer_source = "knowledge"
             if isinstance(self.model, RuleBasedLocalModel):
                 outcome.answer = summarize_local_retrieval(text, hits)
-                outcome.citations = self.rag.citations(hits[:3])
+                outcome.citations = self.rag.citations(hits[:3], self.settings)
         elif _used_business_tool(result):
             outcome.answer_source = "tool"
         return outcome
@@ -771,15 +805,25 @@ class SupportAgent:
             # Repair older conversations whose first OCR pass discarded telemetry.
             # Only images belonging to user messages in this active topic qualify.
             message_id = await self.db.scalar(
-                select(Message.id).join(MessageImage, MessageImage.message_id == Message.id)
-                .where(Message.session_id == conversation.id, Message.role == "user",
-                       Message.content.in_([m["content"] for m in history if m["role"] == "user"]))
-                .order_by(Message.created_at.desc()).limit(1)
+                select(Message.id)
+                .join(MessageImage, MessageImage.message_id == Message.id)
+                .where(
+                    Message.session_id == conversation.id,
+                    Message.role == "user",
+                    Message.content.in_([m["content"] for m in history if m["role"] == "user"]),
+                )
+                .order_by(Message.created_at.desc())
+                .limit(1)
             )
             if message_id:
-                images = (await self.db.scalars(select(MessageImage)
-                    .where(MessageImage.message_id == message_id)
-                    .order_by(MessageImage.position).limit(6))).all()
+                images = (
+                    await self.db.scalars(
+                        select(MessageImage)
+                        .where(MessageImage.message_id == message_id)
+                        .order_by(MessageImage.position)
+                        .limit(6)
+                    )
+                ).all()
                 recovered = []
                 for image in images:
                     try:
@@ -790,8 +834,7 @@ class SupportAgent:
                         continue
                 if recovered:
                     text += (
-                        "\n本会话历史图片重新识别（数值需核对）：\n"
-                        + "\n".join(recovered)[:2400]
+                        "\n本会话历史图片重新识别（数值需核对）：\n" + "\n".join(recovered)[:2400]
                     )
         user_message = await self._save_message(conversation.id, "user", text)
 

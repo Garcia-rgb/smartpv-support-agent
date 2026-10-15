@@ -9,6 +9,7 @@ from pypdf import PdfReader
 @dataclass(frozen=True)
 class PageText:
     """从源文件中提取的一页文本；普通文本文件没有页码。"""
+
     page: int | None
     text: str
 
@@ -38,8 +39,15 @@ def extract_pages(filename: str, data: bytes) -> list[PageText]:
     return [PageText(page=None, text=text)]
 
 
-def chunk_pages(pages: list[PageText], chunk_size: int = 700, overlap: int = 100) -> list[PageText]:
+def chunk_pages(
+    pages: list[PageText], chunk_size: int | None = None, overlap: int | None = None
+) -> list[PageText]:
     """按字符数切分页面，并保留相邻片段间的重叠内容。"""
+    from ..config import get_settings
+
+    settings = get_settings()
+    chunk_size = settings.chunk_size if chunk_size is None else chunk_size
+    overlap = settings.chunk_overlap if overlap is None else overlap
     if chunk_size <= overlap or overlap < 0:
         raise ValueError("chunk_size 必须大于 overlap")
     chunks: list[PageText] = []

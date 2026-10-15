@@ -29,7 +29,7 @@ Math.floor((Date.now()-began)/1000)+' 秒',1000);</script></body>"""
 def request_activation(data_root=DATA_ROOT):
     folder = data_root / ".desktop"
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "activate.request").write_text(str(time.time_ns()), encoding="ascii")
+    (folder / "activate.request").write_text(secrets.token_hex(16), encoding="ascii")
 
 
 def activate_window(window):
@@ -50,6 +50,7 @@ def ready_version(url: str, instance: str | None = None) -> str | None:
 
 
 def main() -> int:
+    began = time.monotonic()
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     os.chdir(DATA_ROOT)
     if sys.platform == "win32":
@@ -93,7 +94,13 @@ def main() -> int:
     launch_token = secrets.token_hex(16)
     (DATA_ROOT / ".logs").mkdir(parents=True, exist_ok=True)
     service_log = (DATA_ROOT / ".logs/desktop-service.log").open("a", encoding="utf-8")
-    began = time.monotonic()
+
+    # Ignore requests left by previous runs. Never wait on a window that has
+    # not been shown yet: pywebview's API wrappers otherwise block for 20s.
+    try:
+        initial_activation = (profile.parent / "activate.request").read_text("ascii")
+    except FileNotFoundError:
+        initial_activation = None
 
     def stage(value):
         print(f"Desktop startup: {value} ({time.monotonic() - began:.1f}s)", flush=True)
@@ -123,7 +130,6 @@ def main() -> int:
         try:
             # pythonw can inherit a hidden startup flag from a batch launcher.
             # Restore/show explicitly so the first launch is visible as well.
-            activate_window(window)
             stage("loading_service")
             from start_client import HOST, pick_port, reachable
 
@@ -150,25 +156,32 @@ def main() -> int:
             if not stopping.is_set():
                 url = target
                 stage("loading_page")
-                window.load_url(target)
+                window.load_url(target + "/?v=" + __version__)
         except Exception:
             import traceback
 
             print(traceback.format_exc(), flush=True)
             stage("failed")
+            if server:
+                (profile.parent / "service-stop.request").write_text(launch_token, encoding="ascii")
             if not stopping.is_set():
                 window.load_html('<meta charset="utf-8"><h2>启动失败</h2><p>请查看日志：</p><pre>'
                                  + html.escape(str(DATA_ROOT / ".logs/desktop-service.log"))
-                                 + "</pre>")
+                                 + "</pre><p>请关闭窗口后重新打开。</p>")
+
+    def shown(*_args):
+        activate_window(window)
+
+    window.events.shown += shown
 
     def watch_service():
         nonlocal server
         restarts = 0
-        activation = None
+        activation = initial_activation
         while not stopping.wait(.4):
             try:
                 requested = (profile.parent / "activate.request").read_text("ascii")
-                if requested != activation:
+                if requested != activation and window.events.shown.is_set():
                     activate_window(window)
                     activation = requested
                     (profile.parent / "activation.json").write_text(json.dumps({

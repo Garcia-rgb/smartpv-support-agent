@@ -191,14 +191,14 @@ async def test_out_of_corpus_question_asks_for_clarification_before_calling_the_
 
     追问话术同理：它是同一个判定的另一种出口，交给模型写就会漂回「我不知道」。
     """
-    from support_agent.services.rag import CORPUS_MISSING_MIN_CHUNKS
+    from support_agent.config import get_settings
 
     # 正文刻意含「安装环境」，好让「Python 装环境」的中文部分能对上——
     # 这样拦住它的只能是外文词判据，而不是「词组缺失比例」那条。
     await _seed_identical_chunks(
         db_session,
         "逆变器安装环境要求：避免阳光直射。RS485 走屏蔽双绞线，MPPT 跟踪组串电压。",
-        CORPUS_MISSING_MIN_CHUNKS + 5,
+        get_settings().retrieval_corpus_min_chunks + 5,
     )
 
     model = CapturingModel("Python 环境可以用 conda 装……")
@@ -226,12 +226,12 @@ async def test_colloquial_question_hits_the_same_gate_and_still_gets_a_clarifica
     所以措辞差得远的真问题（「柜子里一直嗡嗡响」其实问的是异响排查）一样会被它拦下。
     与其一律回「找不到依据」把能答的问题推走，不如请用户补一句型号或现象。
     """
-    from support_agent.services.rag import CORPUS_MISSING_MIN_CHUNKS
+    from support_agent.config import get_settings
 
     await _seed_identical_chunks(
         db_session,
         "合母与控母的区别：合母为合闸母线，控母为控制母线，两段母线的电压等级与用途不同。",
-        CORPUS_MISSING_MIN_CHUNKS + 5,
+        get_settings().retrieval_corpus_min_chunks + 5,
     )
 
     model = CapturingModel("应该是柜内接触器的问题。")
@@ -261,12 +261,12 @@ async def test_structured_intents_are_exempt_from_the_corpus_gate(
 
     三类锚点合在一个用例里跑，是因为判据按片段数启用，每建一次语料要 65 个片段。
     """
-    from support_agent.services.rag import CORPUS_MISSING_MIN_CHUNKS
+    from support_agent.config import get_settings
 
     await _seed_identical_chunks(
         db_session,
         "逆变器安装环境要求：避免阳光直射。RS485 走屏蔽双绞线，MPPT 跟踪组串电压。",
-        CORPUS_MISSING_MIN_CHUNKS + 5,
+        get_settings().retrieval_corpus_min_chunks + 5,
     )
 
     for text in ("SN-2024-000123 这台设备现在什么状态", "计算 100*0.986"):

@@ -56,8 +56,12 @@ def starts_issue(text: str, history: list[dict[str, str]]) -> bool:
     return bool(product_models(text) or re.search(r"怎么|如何|逆变器|数采|采集器|电表", text))
 
 
-def issue_state(text: str, history: list[dict[str, str]]) -> str:
+def issue_state(text: str, history: list[dict[str, str]], settings=None) -> str:
     """Build a compact factual ledger from user messages only, never suggestions."""
+    if settings is None:
+        from ..config import get_settings
+
+        settings = get_settings()
     users = [m["content"] for m in history if m["role"] == "user"] + [text]
     for index in range(len(users) - 1, -1, -1):
         if re.search(r"另一个问题|换个问题|新问题|不说这个", users[index]):
@@ -67,17 +71,20 @@ def issue_state(text: str, history: list[dict[str, str]]) -> str:
         return ""
     models = list(dict.fromkeys(m for value in users for m in product_models(value)))
     observed = [
-        value[:500]
+        value[: settings.state_feedback_chars]
         for value in users
         if re.search(r"检查|已|测得|测了|尝试|试了|灯亮|灯不亮|正常|恢复|无效|还是|仍然", value)
     ]
     lines = [
         "当前问题状态（只记录用户描述，不把助手建议当执行事实）：",
-        "最初现象：" + users[0][:700],
+        "最初现象：" + users[0][: settings.followup_user_chars],
     ]
     if models:
         lines.append("用户提及型号：" + "、".join(models))
     if observed:
-        lines.append("最近实际反馈（仍须区分用户假设与检查确认）：\n" + "\n".join(observed[-5:]))
-    lines.append("当前追问：" + text[:700])
+        lines.append(
+            "最近实际反馈（仍须区分用户假设与检查确认）：\n"
+            + "\n".join(observed[-settings.state_feedback_limit :])
+        )
+    lines.append("当前追问：" + text[: settings.followup_user_chars])
     return "\n".join(lines)

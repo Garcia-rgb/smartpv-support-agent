@@ -1,0 +1,4 @@
+# 候选方案，仅用于实验，不是新的生产默认值。改变切块需要独立重建实验索引。
+[chunking]
+chunk_size = 300
+chunk_overlap = 50

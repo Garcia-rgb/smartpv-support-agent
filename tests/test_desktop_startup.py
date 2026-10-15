@@ -10,13 +10,17 @@ SCRIPT = Path(__file__).parents[1] / "scripts/start_desktop.py"
 
 class Event:
     def __iadd__(self, callback):
+        self.callback = callback
         return self
+
+    def is_set(self):
+        return True
 
 
 def test_loading_window_precedes_service_initialization(tmp_path, monkeypatch):
     module = runpy.run_path(str(SCRIPT))
     scope = module["main"].__globals__
-    window = SimpleNamespace(events=SimpleNamespace(loaded=Event()), load_url=Mock(),
+    window = SimpleNamespace(events=SimpleNamespace(loaded=Event(), shown=Event()), load_url=Mock(),
                              restore=Mock(), show=Mock())
     create = Mock(return_value=window)
     checked = []
@@ -30,6 +34,7 @@ def test_loading_window_precedes_service_initialization(tmp_path, monkeypatch):
     def start(initialize, **kwargs):
         assert create.called and not checked
         assert "正在加载" in create.call_args.kwargs["html"]
+        window.events.shown.callback()
         initialize()
 
     def launch(args, **kwargs):
@@ -53,7 +58,8 @@ def test_loading_window_precedes_service_initialization(tmp_path, monkeypatch):
     assert module["main"]() == 0
     window.restore.assert_called_once()
     window.show.assert_called_once()
-    window.load_url.assert_called_once_with("http://127.0.0.1:8000")
+    from support_agent import __version__
+    window.load_url.assert_called_once_with("http://127.0.0.1:8000/?v=" + __version__)
 
 
 def test_activation_requests_are_distinct_and_restore_before_show(tmp_path):

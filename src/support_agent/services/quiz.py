@@ -9,6 +9,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import get_settings
 from ..models import DocumentChunk, SourceDocument
 from ..schemas import Citation, QuizResponse
 from .rag import RAGService
@@ -170,8 +171,8 @@ async def _semantic_disambiguate(
     options: dict[str, str],
     rag: RAGService,
     *,
-    top_k: int = 2,
-    lead: float = 0.03,
+    top_k: int | None = None,
+    lead: float | None = None,
     visibility: str | None = None,
 ) -> tuple[str, dict[str, float], list] | None:
     """子串证据判不出（多个选项都命中原文或都命中不了）时的兜底。
@@ -180,6 +181,8 @@ async def _semantic_disambiguate(
     领先阈值 lead 用来挡「四个选项分数差不多」的瞎猜——分不开就宁可答不出。
     只对单选题启用；多选的组合空间太大，逐项打分不可靠。
     """
+    top_k = rag.settings.quiz_option_top_k if top_k is None else top_k
+    lead = rag.settings.quiz_option_lead if lead is None else lead
     scores: dict[str, float] = {}
     per_key_hits: dict[str, list] = {}
     for key, value in options.items():
@@ -241,8 +244,9 @@ def _query_variants(question: str) -> list[str]:
 
 
 async def _search_question(
-    rag: RAGService, question: str, top_k: int = 6, *, visibility: str | None = None
+    rag: RAGService, question: str, top_k: int | None = None, *, visibility: str | None = None
 ):
+    top_k = rag.settings.quiz_search_top_k if top_k is None else top_k
     seen: set[int] = set()
     merged = []
     for query in _query_variants(question):
@@ -259,16 +263,17 @@ async def answer_question(
     db: AsyncSession,
     raw_text: str,
     *,
-    chunk_size: int = 700,
-    overlap: int = 100,
+    chunk_size: int | None = None,
+    overlap: int | None = None,
     llm_client: object | None = None,
     visibility: str | None = None,
 ) -> QuizResponse:
     kind, question, options = parse_question(raw_text)
-    rag = RAGService(db, chunk_size, overlap)
+    settings = getattr(llm_client, "settings", None) or get_settings()
+    rag = RAGService(db, chunk_size, overlap, settings=settings)
     hits = await _search_question(rag, question, visibility=visibility)
     hcsa_hits = [h for h in hits if "HCSA" in h.document.filename or "M11" in h.document.filename]
-    citations = RAGService.citations(hcsa_hits[:2])
+    citations = RAGService.citations(hcsa_hits[:2], settings)
     selected: list[str] = []
     explanation = "当前资料没有足够明确的答案，建议核对教材对应章节后再作答。"
     status = "insufficient_evidence"
@@ -374,7 +379,7 @@ async def answer_question(
                 + f" 选项 {'、'.join(keys)} 与原文表述一致"
                 + ("，其余选项未在原文出现。" if len(keys) < len(options) else "。")
             )
-            citations = RAGService.citations((hcsa_hits or hits)[:2])
+            citations = RAGService.citations((hcsa_hits or hits)[:2], settings)
 
     if not selected and kind == "单选" and 2 <= len(options) <= 6:
         disambiguated = await _semantic_disambiguate(
@@ -392,7 +397,7 @@ async def answer_question(
                 + (f"第{top.chunk.page}页：" if top.chunk.page else "：")
                 + top.chunk.content[:200].replace("\n", " ")
             )
-            citations = RAGService.citations((hcsa_hits or best_hits)[:2])
+            citations = RAGService.citations((hcsa_hits or best_hits)[:2], settings)
 
     if not selected and llm_client is not None:
         # 本地规则一路判不出，才把检索到的原文连同题目交给远程模型读。
@@ -402,7 +407,7 @@ async def answer_question(
                 keys, reason = await llm_client.select_options(
                     question,
                     options,
-                    [h.chunk.content for h in hits[:4]],
+                    [h.chunk.content for h in hits[:settings.quiz_evidence_top_k]],
                     multi=kind == "多选",
                 )
             except Exception:
@@ -416,7 +421,7 @@ async def answer_question(
                     if reason
                     else f"模型依据资料原文选择 {'、'.join(keys)}。"
                 )
-                citations = RAGService.citations((hcsa_hits or hits)[:2])
+                citations = RAGService.citations((hcsa_hits or hits)[:2], settings)
 
     return QuizResponse(
         status=status,

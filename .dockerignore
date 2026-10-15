@@ -24,3 +24,5 @@ recovery
 .localdeps
 .testdeps
 .pytest-runs
+.desktop
+本地文档

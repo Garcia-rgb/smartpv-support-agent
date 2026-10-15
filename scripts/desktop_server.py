@@ -1,5 +1,6 @@
 """Run the desktop's local API independently of the Windows GUI runtime."""
 
+import faulthandler
 import json
 import os
 import sys
@@ -15,16 +16,30 @@ sys.path[:0] = [str(ROOT / "src"), str(ROOT / ".localdeps")]
 def run(port: int, token: str, parent_pid: int):
     os.chdir(DATA_ROOT)
     began = time.monotonic()
-    import uvicorn
-
-    from support_agent import __version__
-    from support_agent.config import get_settings
-    from support_agent.main import app
-    from support_agent.services.runtime_identity import runtime_identity
-
     folder = DATA_ROOT / ".desktop"
+    (DATA_ROOT / ".logs").mkdir(parents=True, exist_ok=True)
+    diagnostic = (DATA_ROOT / ".logs/startup-stacks.log").open("a", encoding="utf-8")
+    faulthandler.dump_traceback_later(10, repeat=True, file=diagnostic)
+    from support_agent.desktop_runtime import prefer_python_sqlalchemy
+
+    prefer_python_sqlalchemy()
+    try:
+        print("Desktop API stage: import uvicorn", flush=True)
+        import uvicorn
+
+        from support_agent import __version__
+        print("Desktop API stage: import settings", flush=True)
+        from support_agent.config import get_settings
+        print("Desktop API stage: import application", flush=True)
+        from support_agent.main import app
+        from support_agent.services.runtime_identity import runtime_identity
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        diagnostic.close()
+
     state = {"pid": os.getpid(), "token": token, "version": __version__,
-             "instance": runtime_identity(get_settings()), "port": port}
+             "instance": runtime_identity(get_settings()), "port": port,
+             "startup_seconds": round(time.monotonic() - began, 3), "sqlalchemy_mode": "python"}
     partial = folder / ("service-" + token + ".partial")
     partial.write_text(json.dumps(state), encoding="utf-8")
     partial.replace(folder / "service-ready.json")

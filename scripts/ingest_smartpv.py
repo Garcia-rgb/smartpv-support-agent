@@ -57,7 +57,9 @@ async def main() -> None:
     chunk_size = args.chunk_size if args.chunk_size is not None else settings.chunk_size
     overlap = args.overlap if args.overlap is not None else settings.chunk_overlap
 
-    backend = get_embedding_backend()
+    if not 0 <= overlap < chunk_size:
+        raise ValueError("overlap must be smaller than chunk_size")
+    backend = get_embedding_backend(settings)
     print(f"向量后端：{backend.signature}")
     print(f"切块参数：chunk_size={chunk_size} overlap={overlap}")
 

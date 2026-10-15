@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -18,9 +19,13 @@ async def evaluate(cases_path: Path, output: Path) -> None:
         agent = SupportAgent(db, get_settings())
         for case in cases:
             hits = await agent.retrieve(case["question"])
-            selected = agent.evidence_hits(hits) if hasattr(agent, "evidence_hits") else hits[:2]
+            selected = (
+                agent.evidence_hits(hits, agent.settings)
+                if hasattr(agent, "evidence_hits")
+                else hits[:2]
+            )
             # Match the deployed private-answer gate; weak raw candidates are not usable evidence.
-            if not hits or hits[0].score < 0.35:
+            if not hits or hits[0].score < agent.settings.grounded_answer_min_score:
                 selected = []
             source_ok = not case.get("expected_source") or any(
                 case["expected_source"] in h.document.filename for h in selected
@@ -55,6 +60,8 @@ async def evaluate(cases_path: Path, output: Path) -> None:
             {
                 "version": __version__,
                 "mode": "local_retrieval_only",
+                "tuning": get_settings().tuning_snapshot(),
+                "suite_sha256": hashlib.sha256(cases_path.read_bytes()).hexdigest(),
                 "passed": sum(r["passed"] for r in results),
                 "total": len(results),
                 "results": results,

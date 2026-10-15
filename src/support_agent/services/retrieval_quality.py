@@ -3,6 +3,8 @@
 import re
 from collections.abc import Mapping
 
+from ..config import Settings, get_settings
+
 MODEL = re.compile(
     r"(?<![A-Z0-9])(?:SUN2000(?:-[A-Z0-9]+)*|GW\d+[A-Z0-9]*(?:-[A-Z0-9]+)*|"
     r"SmartLogger\d*[A-Z]*|DTSU\d+(?:-[A-Z])?|NetEco\d+[A-Z]*)(?![A-Z0-9_-])",
@@ -58,40 +60,47 @@ def query_variants(query: str) -> list[str]:
         if pattern.search(query):
             variants.append(" ".join(brands + [canonical]))
     if re.search(r"平台|实时信息|实时数据|组串|电压|电流|数据.*不对|值有问题", query):
-        variants = [query, "平台 实时数据 设备信息 数据查询 指标关联",
-                    "平台 数据异常 点表 寄存器 倍率 字序"]
+        variants = [
+            query,
+            "平台 实时数据 设备信息 数据查询 指标关联",
+            "平台 数据异常 点表 寄存器 倍率 字序",
+        ]
     return list(dict.fromkeys(variants))[:3]
 
 
-def identity_adjustment(query: str, content: str) -> float:
+def identity_adjustment(query: str, content: str, settings: Settings | None = None) -> float:
+    settings = settings or get_settings()
     wanted, found = set(product_models(query)), set(product_models(content))
-    score = 0.12 if wanted & found else 0.0
+    score = settings.identity_model_match_bonus if wanted & found else 0.0
     if re.search(r"平台|实时信息|实时数据|值有问题|数据.*不对", query):
         if re.search(r"实时数据|设备信息|数据查询|指标关联", content):
-            score += .14
+            score += settings.identity_platform_bonus
     # A different exact model remains visible as a weaker, explicitly limited source.
     if wanted and found and not wanted & found:
-        score -= 0.12
+        score -= settings.identity_model_conflict_penalty
     qbrands = {name for name, p in BRANDS.items() if p.search(query)}
     cbrands = {name for name, p in BRANDS.items() if p.search(content)}
     if qbrands & cbrands:
-        score += 0.04
+        score += settings.identity_brand_match_bonus
     elif qbrands and cbrands:
-        score -= 0.25
+        score -= settings.identity_brand_conflict_penalty
     for pattern, _, terms in TOPICS:
         if pattern.search(query):
-            score += min(0.12, 0.04 * sum(t in content for t in terms))
+            score += min(
+                settings.identity_topic_bonus_cap,
+                settings.identity_topic_term_bonus * sum(t in content for t in terms),
+            )
     if TOPICS[0][0].search(query) and re.search(r"通[讯信]地址.{0,4}设置", content[:250]):
-        score += 0.18
+        score += settings.identity_address_bonus
     if TOPICS[1][0].search(query) and re.search(r"逆变器.{0,8}通[讯信]中断", content):
-        score += 0.12
+        score += settings.identity_communication_bonus
     if not re.search(r"AGC|AVC|一次调频", query, re.I) and re.search(
         r"AGC|AVC|一次调频", content[:180], re.I
     ):
-        score -= 0.15
+        score -= settings.identity_unrelated_control_penalty
     codes = re.findall(r"(?<!\d)\d{4,5}(?!\d)", query)
     if any(re.search(r"(?<!\d)" + code + r"(?!\d)", content) for code in codes):
-        score += 0.08
+        score += settings.identity_alarm_code_bonus
     return score
 
 

@@ -320,7 +320,7 @@ async def review_case(review_id: str, body: Review, db: DB, settings: Config, us
                 [PageText(text=text, page=None)], settings.chunk_size, settings.chunk_overlap
             )
         ]
-        rag = RAGService(db, settings.chunk_size, settings.chunk_overlap)
+        rag = RAGService(db, settings=settings)
         try:
             vectors = await rag.backend.embed_async(pieces)
         except Exception as exc:

@@ -7,6 +7,7 @@ from typing import Literal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import Settings, get_settings
 from ..models import DocumentChunk, SourceDocument
 from ..schemas import Citation, VersionConflict
 from .cache import RetrievalCache, get_retrieval_cache, load_hits_by_id
@@ -30,13 +31,11 @@ logger = logging.getLogger("support_agent")
 QUERY_FILLERS = ("请问", "是什么", "是啥", "如何处理", "怎么处理", "怎么办", "怎么解决")
 
 # 三路文本信号的权重。它们管的是「这段话在不在讲我想问的事」。
-TEXT_WEIGHTS = {"lexical": 0.30, "phrase": 0.35, "semantic": 0.35}
 
 # 覆盖率锐化指数。覆盖率是线性的：命中 7 个实词里的 3 个就拿 0.43，
 # 而这 3 个往往是「装」「用」「作」这类最普通的字。平方之后，
 # 高覆盖的片段几乎不受影响、半覆盖的被压下去，库内与库外的分数才拉得开。
 # 实测：不加锐化时间隔只有 0.016，平方后为 0.089。
-COVERAGE_SHARPNESS = 2.0
 
 # 哈希向量的可信度下限见 `semantic.HashEmbeddingBackend`：那是给字符级碰撞设的折扣，
 # 真语义模型不打折。检索侧统一从 ``self.backend.semantic_trust_floor`` 取。
@@ -53,7 +52,6 @@ COVERAGE_SHARPNESS = 2.0
 #
 # 所以改用第二个判据做分工：分数管「这段的字面覆盖够不够」，
 # 缺失比例管「问题的词汇本身在不在语料里」。
-CORPUS_MISSING_CEILING = 0.60
 
 # 启用上面那条判据所需的最小语料规模（按**片段数**计，不按文档数）。
 #
@@ -63,7 +61,6 @@ CORPUS_MISSING_CEILING = 0.60
 #
 # 实测语料 212 片段、库内问题缺失比例最高 0.50，库外从 0.60 起跳，
 # 阈值取 0.60 时库内 30 条全部放行、库外成批拦截。
-CORPUS_MISSING_MIN_CHUNKS = 60
 
 
 def has_unknown_foreign_token(query_units: Counter[str], unit_df: Counter[str]) -> bool:
@@ -91,6 +88,7 @@ def out_of_corpus(
     unit_df: Counter[str],
     phrase_df: Counter[str],
     total_chunks: int,
+    settings: Settings | None = None,
 ) -> bool:
     """问题的词汇是否基本落在语料之外。
 
@@ -102,7 +100,7 @@ def out_of_corpus(
     不代表语料里一定没有答案——校准过的阈值只能做到这个程度。
     """
     return (
-        corpus_scope_reason(query_units, query_phrases, unit_df, phrase_df, total_chunks)
+        corpus_scope_reason(query_units, query_phrases, unit_df, phrase_df, total_chunks, settings)
         is not None
     )
 
@@ -118,17 +116,19 @@ def corpus_scope_reason(
     unit_df: Counter[str],
     phrase_df: Counter[str],
     total_chunks: int,
+    settings: Settings | None = None,
 ) -> CorpusScopeReason | None:
     """判为语料外时返回原因，在范围内则返回 None。
 
     判据本身与 `out_of_corpus` 完全一致，只是把「为什么」也一并带出来：
     Agent 侧要按原因决定追问的措辞，光知道是/否不够用。
     """
-    if total_chunks < CORPUS_MISSING_MIN_CHUNKS:
+    settings = settings or get_settings()
+    if total_chunks < settings.retrieval_corpus_min_chunks:
         return None
     if query_phrases:
         missing = sum(1 for term in query_phrases if phrase_df.get(term, 0) == 0)
-        if missing / len(query_phrases) >= CORPUS_MISSING_CEILING:
+        if missing / len(query_phrases) >= settings.retrieval_corpus_missing_ceiling:
             return "missing_terminology"
     if has_unknown_foreign_token(query_units, unit_df):
         return "unknown_foreign_terms"
@@ -138,16 +138,10 @@ def corpus_scope_reason(
 # 元数据加权：命中所问机型/协议/场景的片段往上抬，明确属于别的机型/场景的往下压。
 # 用加减而不是乘除，是因为文本分集中在 0.3~0.8 这个区间，
 # 乘法对小分值的压制太弱，加法更容易让「同类候选」排到「异类候选」前面。
-MATCH_BONUS = 0.06
-CONFLICT_PENALTY = 0.10
 
 # 判定「版本并存」的分数带：差距在这个比例内的命中，视为同一档次的依据。
-CONFLICT_SCORE_RATIO = 0.85
 # 最多并列几个版本，避免一次检索把所有版本都铺出来。
-CONFLICT_MAX_GROUPS = 3
 # 每个版本最多摘几句，够用户判断依据来自哪里即可。
-CONFLICT_EXCERPTS_PER_GROUP = 2
-CONFLICT_EXCERPT_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -192,17 +186,19 @@ class RAGService:
     def __init__(
         self,
         db: AsyncSession,
-        chunk_size: int = 700,
-        overlap: int = 100,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
         backend: EmbeddingBackend | None = None,
         cache: RetrievalCache | None = None,
+        settings: Settings | None = None,
     ):
         self.db = db
-        self.chunk_size = chunk_size
-        self.overlap = overlap
+        self.settings = settings or get_settings()
+        self.chunk_size = self.settings.chunk_size if chunk_size is None else chunk_size
+        self.overlap = self.settings.chunk_overlap if overlap is None else overlap
         # 入库和检索必须用同一个后端，否则存进去的向量和查询向量不在一个空间。
         # 默认按配置取，测试或脚本可以显式传进来。
-        self.backend = backend or get_embedding_backend()
+        self.backend = backend or get_embedding_backend(self.settings)
         # 缓存默认按配置取（没配 Redis 就是进程内实现）。传进来是为了让评测和
         # 测试能控制它——评测如果吃到上一轮留下的缓存，量到的就不是真实检索。
         self.cache = cache if cache is not None else get_retrieval_cache()
@@ -276,7 +272,12 @@ class RAGService:
         index = await self.corpus_index(corpus_id=corpus_id, include_restricted=include_restricted)
         _, query_units, query_phrases = self.query_terms(fallback_query(query, index.unit_df))
         return corpus_scope_reason(
-            query_units, query_phrases, index.unit_df, index.phrase_df, index.total_chunks
+            query_units,
+            query_phrases,
+            index.unit_df,
+            index.phrase_df,
+            index.total_chunks,
+            self.settings,
         )
 
     async def is_out_of_corpus(
@@ -411,11 +412,11 @@ class RAGService:
     async def search(
         self,
         query: str,
-        top_k: int = 5,
+        top_k: int | None = None,
         *,
         corpus_id: str | None = None,
         include_restricted: bool = False,
-        min_score: float = 0.0,
+        min_score: float | None = None,
         visibility: str | None = None,
     ) -> list[SearchHit]:
         """在指定语料库和权限范围内进行混合检索。
@@ -433,6 +434,8 @@ class RAGService:
         """
         # 先把虚词和口语词剥掉，再算三路信号。不剥的话分母会把「啥」「是」
         # 这些没信息量的字也算进去，真正的问题词反被摊薄。
+        top_k = self.settings.retrieval_top_k if top_k is None else top_k
+        min_score = self.settings.retrieval_min_score if min_score is None else min_score
         key_query, query_units, query_phrases = self.query_terms(query)
         # 缓存键必须带上所有会改变结果的输入：语料、权限、条数、分数阈值、向量后端指纹。
         # 少带任何一个，都会变成「改了配置却还读到旧结果」这类最难排查的问题。
@@ -446,6 +449,7 @@ class RAGService:
             visibility or "all",
             min_score,
             self.backend.signature,
+            self.settings.tuning_snapshot()["fingerprint"],
         )
         cached = await self.cache.get(cache_parts)
         if cached is not None:
@@ -464,7 +468,12 @@ class RAGService:
         # 问题用的词基本不在语料里时直接返回空结果，上游会把它当成
         # 「检索过但没有依据」，走拒答而不是让模型凭记忆作答。
         if out_of_corpus(
-            query_units, query_phrases, index.unit_df, index.phrase_df, index.total_chunks
+            query_units,
+            query_phrases,
+            index.unit_df,
+            index.phrase_df,
+            index.total_chunks,
+            self.settings,
         ):
             # 空结果也值得缓存：跑题问题会被反复问到，而每次判定都要读一遍
             # 全语料并切词统计词频，这一步比算分本身还贵。
@@ -501,20 +510,26 @@ class RAGService:
                 semantic = max(cosine_similarity(query_embedding, stored), 0.0)
             # 哈希向量在覆盖率低时多半是常用字碰撞出来的，此时把语义分压下去；
             # 真语义模型没有这个毛病，折扣取 1（见 semantic.EmbeddingBackend）。
-            floor = self.backend.semantic_trust_floor
+            floor = (
+                self.settings.retrieval_hash_trust_floor
+                if self.backend.name == "hash"
+                else self.backend.semantic_trust_floor
+            )
             semantic *= floor + (1 - floor) * lexical
             score = (
-                TEXT_WEIGHTS["lexical"] * lexical**COVERAGE_SHARPNESS
-                + TEXT_WEIGHTS["phrase"] * phrase**COVERAGE_SHARPNESS
-                + TEXT_WEIGHTS["semantic"] * semantic
+                self.settings.retrieval_lexical_weight
+                * lexical**self.settings.retrieval_coverage_sharpness
+                + self.settings.retrieval_phrase_weight
+                * phrase**self.settings.retrieval_coverage_sharpness
+                + self.settings.retrieval_semantic_weight * semantic
             )
             signals = metadata_signals(facets, chunk.chunk_metadata or {})
             if signals.matched:
-                score += MATCH_BONUS * len(signals.matched)
+                score += self.settings.retrieval_metadata_match_bonus * len(signals.matched)
             if signals.conflicted:
-                score -= CONFLICT_PENALTY * len(signals.conflicted)
-            if score > 0.05:
-                score += identity_adjustment(query, chunk.content)
+                score -= self.settings.retrieval_metadata_conflict_penalty * len(signals.conflicted)
+            if score > self.settings.retrieval_identity_min_score:
+                score += identity_adjustment(query, chunk.content, self.settings)
             if score > 0 and score >= min_score:
                 hits.append(SearchHit(chunk, document, score))
         ranked = sorted(hits, key=lambda hit: hit.score, reverse=True)[:top_k]
@@ -556,7 +571,9 @@ class RAGService:
         return [SearchHit(chunk, document, score) for chunk, document, score in rows]
 
     @staticmethod
-    def detect_conflicts(hits: list[SearchHit]) -> list[VersionConflict]:
+    def detect_conflicts(
+        hits: list[SearchHit], settings: Settings | None = None
+    ) -> list[VersionConflict]:
         """找出「同一档次、但出自不同资料版本」的依据，并列返回而不是替用户选一个。
 
         判定条件是分数接近 + 版本不同，**不等于**两份资料互相矛盾：教材章节和
@@ -567,12 +584,13 @@ class RAGService:
 
         版本号抽不到的片段不参与判定：拿不到版本还去报冲突，只会制造噪音。
         """
+        settings = settings or get_settings()
         if not hits:
             return []
         best = hits[0].score
         if best <= 0:
             return []
-        threshold = best * CONFLICT_SCORE_RATIO
+        threshold = best * settings.conflict_score_ratio
         grouped: dict[str, list[SearchHit]] = defaultdict(list)
         for hit in hits:
             if hit.score < threshold:
@@ -589,10 +607,10 @@ class RAGService:
             grouped.items(),
             key=lambda item: max(hit.score for hit in item[1]),
             reverse=True,
-        )[:CONFLICT_MAX_GROUPS]
+        )[: settings.conflict_max_groups]
         for version, group in ordered:
             representatives = sorted(group, key=lambda hit: hit.score, reverse=True)[
-                :CONFLICT_EXCERPTS_PER_GROUP
+                : settings.conflict_excerpts_per_group
             ]
             conflicts.append(
                 VersionConflict(
@@ -600,7 +618,8 @@ class RAGService:
                     document_ids=sorted({hit.document.id for hit in group}),
                     filenames=sorted({hit.document.filename for hit in group}),
                     excerpts=[
-                        hit.chunk.content[:CONFLICT_EXCERPT_CHARS] for hit in representatives
+                        hit.chunk.content[: settings.conflict_excerpt_chars]
+                        for hit in representatives
                     ],
                     score=round(max(hit.score for hit in group), 4),
                 )
@@ -608,14 +627,15 @@ class RAGService:
         return conflicts
 
     @staticmethod
-    def citations(hits: list[SearchHit]) -> list[Citation]:
+    def citations(hits: list[SearchHit], settings: Settings | None = None) -> list[Citation]:
+        settings = settings or get_settings()
         return [
             Citation(
                 document_id=hit.document.id,
                 filename=hit.document.filename,
                 chunk_id=hit.chunk.id,
                 page=hit.chunk.page,
-                excerpt=hit.chunk.content[:240],
+                excerpt=hit.chunk.content[: settings.citation_excerpt_chars],
                 score=round(hit.score, 4),
                 document_version=(hit.chunk.chunk_metadata or {}).get("document_version"),
                 scenario=(hit.chunk.chunk_metadata or {}).get("scenario"),

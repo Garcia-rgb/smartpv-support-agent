@@ -23,7 +23,7 @@ def verify(package: Path):
             or not re.fullmatch(r"\d+\.\d+\.\d+", str(manifest.get("version", "")))
             or not isinstance(manifest.get("files"), dict)):
         raise ValueError("安装包格式不正确")
-    allowed = {"src", "static", "scripts", ".runtime", ".localdeps", "models"}
+    allowed = {"src", "static", "scripts", ".runtime", ".localdeps", "models", "config"}
     for name, expected in manifest["files"].items():
         parts = PurePosixPath(name).parts
         if (not parts or ".." in parts or "\\" in name or ":" in name
@@ -31,6 +31,11 @@ def verify(package: Path):
             raise ValueError("安装包包含越界路径")
         if parts[0] not in allowed and name not in {"LICENSE", ".env.example", "README.md"}:
             raise ValueError("安装包包含用户数据或未知文件")
+        if parts[0] == "config" and name not in {
+            "config/agent.toml", "config/experiments/smaller_chunks.toml",
+            "config/experiments/longer_context.toml",
+        }:
+            raise ValueError("安装包包含未知配置文件")
         path = package / name
         if path.is_symlink() or not path.resolve().is_relative_to(package.resolve()):
             raise ValueError("安装包路径不正确")
@@ -47,6 +52,9 @@ def verify(package: Path):
     if tuple(map(int, manifest["version"].split("."))) >= (1, 15, 1):
         if "scripts/desktop_server.py" not in manifest["files"]:
             raise ValueError("安装包缺少独立服务启动文件")
+    if tuple(map(int, manifest["version"].split("."))) >= (1, 16, 0):
+        if "config/agent.toml" not in manifest["files"]:
+            raise ValueError("安装包缺少调参配置文件")
     return manifest
 
 
@@ -98,6 +106,10 @@ def install(package: Path, target: Path, *, shortcuts=True):
                 shutil.copy2(package / name, destination)
             shutil.copy2(package / "manifest.json", stage / "manifest.json")
             stage.rename(release)
+        tuning = data / "config/agent.toml"
+        if not tuning.exists() and (release / "config/agent.toml").exists():
+            tuning.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(release / "config/agent.toml", tuning)
         config = data / ".env"
         if not config.exists():
             import secrets
