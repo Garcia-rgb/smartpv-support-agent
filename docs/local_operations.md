@@ -2,7 +2,7 @@
 
 ## Windows 离线安装
 
-解压 `SmartPVSupport-1.15.0-windows.zip`，双击 `Install.cmd`。程序安装到 `%LOCALAPPDATA%\SmartPVSupport\releases\版本号`，用户数据固定保存在同目录的 `data` 文件夹。首次安装会在安装窗口显示一次管理员初始密码，登录后修改。桌面启动项为“光伏技术支持客户端”。需 Windows 10/11、.NET Framework 4.8 与 Microsoft Edge WebView2 Runtime；无需另装 Python。
+解压对应版本的 `SmartPVSupport-版本号-windows.zip`，双击 `Install.cmd`。程序安装到 `%LOCALAPPDATA%\SmartPVSupport\releases\版本号`，用户数据固定保存在同目录的 `data` 文件夹。首次安装会在安装窗口显示一次管理员初始密码，登录后修改。桌面启动项为“光伏技术支持客户端”。需 Windows 10/11、.NET Framework 4.8 与 Microsoft Edge WebView2 Runtime；无需另装 Python。
 
 安装包仅包含程序、Python 与依赖库，不包含现有项目的数据库、公司资料、聊天记录或 `.env`。新装默认关闭远程模型；管理员需在 `data\.env` 配置模型与资料路径。现有项目的配置不改变。默认使用 Hash 检索；需要语义检索时配置本地 ONNX 模型目录。
 
@@ -30,4 +30,4 @@
 
 ## 包构建
 
-`python scripts/build_desktop_package.py --output dist/SmartPVSupport-1.15.0-windows.zip`。只复制明确列出的程序、运行时和依赖目录。禁止把实际资料或密钥加入安装包。
+`python scripts/build_desktop_package.py --output dist/SmartPVSupport-1.15.1-windows.zip`。只复制明确列出的程序、运行时和依赖目录。禁止把实际资料或密钥加入安装包。

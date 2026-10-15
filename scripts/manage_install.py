@@ -44,6 +44,9 @@ def verify(package: Path):
                      "scripts/release_probe.py", "static/index.html"):
         if required not in manifest["files"]:
             raise ValueError("安装包缺少运行文件：" + required)
+    if tuple(map(int, manifest["version"].split("."))) >= (1, 15, 1):
+        if "scripts/desktop_server.py" not in manifest["files"]:
+            raise ValueError("安装包缺少独立服务启动文件")
     return manifest
 
 
@@ -138,9 +141,10 @@ def install(package: Path, target: Path, *, shortcuts=True):
             + str(target) + '"\r\npause\r\n', encoding="utf-8",
         )
         if shortcuts:
-            from create_desktop_launcher import desktop_directory
-            shortcut = desktop_directory() / "光伏技术支持客户端.cmd"
-            shortcut.write_text(launch_cmd, encoding="utf-8")
+            from create_desktop_launcher import create_shortcut, desktop_directory
+            create_shortcut(desktop_directory() / "光伏技术支持客户端.lnk", "powershell.exe",
+                            '-NoProfile -ExecutionPolicy Bypass -File "' + str(launcher) + '"',
+                            target, release / "static/app-icon.ico")
     return {"status": "installed", "version": manifest["version"], "data": str(data)}
 
 
