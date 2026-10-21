@@ -620,7 +620,7 @@ class SupportAgent:
             return TurnOutcome(
                 status="completed",
                 answer_source="policy",
-                answer=f"点表制作：{direction}，上传设备协议Word/PDF。\n"
+                answer=f"点表制作：{direction}，上传设备协议Word/PDF或Excel点表。\n"
                 "我会提取原文点位；缺失项由你补充，再检查地址、数据类型、倍率和字序。\n"
                 "确认后生成下载文件，尚未写入现场设备。",
                 next_action="point_table",

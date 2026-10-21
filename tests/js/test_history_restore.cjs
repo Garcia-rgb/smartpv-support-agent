@@ -27,6 +27,7 @@ const context={state:{userId:'alice',sessionId:null,busy:false},
   input:new Element(),autoGrow:()=>{},closeHistorySidebar:()=>{},
 };
 vm.createContext(context);
+vm.runInContext(fs.readFileSync('static/time-format.js','utf8'),context);
 vm.runInContext(html.slice(html.indexOf('function lastSessionKey()'),html.indexOf('async function checkHealth()')),context);
 (async()=>{
   context.rememberSession('old');context.state.sessionId=null; // Simulated page restart.

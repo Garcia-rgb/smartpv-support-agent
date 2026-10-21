@@ -27,6 +27,7 @@ from .services.automatic_backup import automatic_backup, backup_state
 from .services.backups import BackupError, backup_path, create_backup, list_backups
 from .services.cache import get_retrieval_cache
 from .services.restore_drill import restore_drill
+from .time_utils import as_utc
 
 router = APIRouter(prefix="/admin", tags=["管理中心"])
 DB = Annotated[AsyncSession, Depends(get_db)]
@@ -84,7 +85,7 @@ async def documents(db: DB, admin: Admin, limit: Limit = 25, offset: Offset = 0)
         scopes = {m.get("visibility", "private") for m in metadata}
         versions = sorted({str(m.get("document_version", "")) for m in metadata})
         items.append({"id": doc.id, "filename": doc.filename, "chunks": len(metadata),
-                      "created_at": doc.created_at, "enabled": any(
+                      "created_at": as_utc(doc.created_at), "enabled": any(
                           m.get("enabled") is not False for m in metadata),
                       "visibility": next(iter(scopes)) if len(scopes) == 1 else "mixed",
                       "document_version": versions[0] if len(versions) == 1 else ""})
@@ -122,7 +123,8 @@ async def audit(db: DB, admin: Admin, limit: Limit = 25, offset: Offset = 0) -> 
     # Legacy tool audit details can contain prompts; do not expose their payloads here.
     return {"items": [{"id": log.id, "actor": username or log.actor,
                        "action": log.action, "resource": log.resource,
-                       "created_at": log.created_at} for log, username in rows], "total": total}
+                       "created_at": as_utc(log.created_at)} for log, username in rows],
+            "total": total}
 
 
 @router.get("/backups")

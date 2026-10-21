@@ -6,6 +6,7 @@ uses a device's Modbus register address as an IEC-104 northbound point number.
 
 import csv
 import io
+import math
 import re
 import zipfile
 from pathlib import Path
@@ -14,22 +15,48 @@ from xml.etree import ElementTree
 from pypdf import PdfReader
 
 SOUTH_COLUMNS = (
-    "通道编号", "设备类型", "设备型号", "厂商名称", "设备编码", "协议类型",
-    "信号点名称", "信号地址", "信号点功能类型", "信号点ID", "信号点数据类型",
-    "单位", "增益", "偏移量", "MODBUS设备地址", "MODBUS信号类型",
-    "MODBUS读写类型", "MODBUS寄存器个数", "MODBUS采集周期", "是否持久化",
-    "字典表编码", "BIT位", "父设备", "电站编号",
+    "通道编号",
+    "设备类型",
+    "设备型号",
+    "厂商名称",
+    "设备编码",
+    "协议类型",
+    "信号点名称",
+    "信号地址",
+    "信号点功能类型",
+    "信号点ID",
+    "信号点数据类型",
+    "单位",
+    "增益",
+    "偏移量",
+    "MODBUS设备地址",
+    "MODBUS信号类型",
+    "MODBUS读写类型",
+    "MODBUS寄存器个数",
+    "MODBUS采集周期",
+    "是否持久化",
+    "字典表编码",
+    "BIT位",
+    "父设备",
+    "电站编号",
 )
 NORTH_COLUMNS = ("信号点名称", "信号点地址", "功能类型", "单位")
 SOUTH_FIELDS = (
-    "通道编号", "设备类型", "设备型号", "厂商名称", "设备编码", "协议类型",
-    "MODBUS设备地址", "电站编号",
+    "通道编号",
+    "设备类型",
+    "设备型号",
+    "厂商名称",
+    "设备编码",
+    "协议类型",
+    "MODBUS设备地址",
+    "电站编号",
 )
 FUNCTIONS = {"遥信", "双点遥信", "遥测", "遥控", "双点遥控", "遥调", "遥脉"}
 REGISTER_TYPES = {"线圈", "输入离散量", "保持寄存器", "输入寄存器"}
 DATA_TYPES = {"BIT", "UINT16", "INT16", "UINT32", "INT32", "FLOAT", "DOUBLE"}
 MAX_BYTES = 10 * 1024 * 1024
 MAX_POINTS = 500
+MAX_OUTPUT_POINTS = 20_000
 _ROW_RE = re.compile(
     r"(?<!\d)(0[xX][0-9A-Fa-f]+|\d{1,5})\x07"
     r"(输出线圈|线圈|输入离散量|保持寄存器|输入寄存器)\x07"
@@ -55,8 +82,10 @@ def _word_docx(data: bytes) -> str:
     lines = []
     for table in root.findall(".//w:tbl", ns):
         for row in table.findall("./w:tr", ns):
-            cells = ["".join(node.text or "" for node in cell.findall(".//w:t", ns))
-                     for cell in row.findall("./w:tc", ns)]
+            cells = [
+                "".join(node.text or "" for node in cell.findall(".//w:t", ns))
+                for cell in row.findall("./w:tc", ns)
+            ]
             if len(cells) == 4:
                 cells.append("")
             lines.append("\x07".join(cells) + "\x07")
@@ -113,18 +142,20 @@ def _raw_rows(text: str) -> list[dict[str, str]]:
         if not name:
             continue
         # The original Word table has separate read and write coil sections.
-        previous = text[:match.start()]
+        previous = text[: match.start()]
         last_read = max(previous.rfind("读线圈操作"), previous.rfind("功能码: 读"))
         last_write = max(previous.rfind("写线圈操作"), previous.rfind("功能码: 写"))
         access = "WO" if register_type == "线圈" and last_write > last_read else "RO"
-        rows.append({
-            "address": address,
-            "register_type": register_type,
-            "name": name,
-            "detail": detail.strip(),
-            "note": note.strip(),
-            "access": access,
-        })
+        rows.append(
+            {
+                "address": address,
+                "register_type": register_type,
+                "name": name,
+                "detail": detail.strip(),
+                "note": note.strip(),
+                "access": access,
+            }
+        )
     if rows:
         return rows[:MAX_POINTS]
     # Text PDFs often have aligned columns instead of Word cell markers.
@@ -137,23 +168,25 @@ def _raw_rows(text: str) -> list[dict[str, str]]:
         match = pattern.match(line)
         if match:
             address, register_type, name, detail = match.groups()
-            rows.append({
-                "address": address,
-                "register_type": "线圈" if register_type == "输出线圈" else register_type,
-                "name": name,
-                "detail": detail or "",
-                "note": "",
-                "access": "",
-            })
+            rows.append(
+                {
+                    "address": address,
+                    "register_type": "线圈" if register_type == "输出线圈" else register_type,
+                    "name": name,
+                    "detail": detail or "",
+                    "note": "",
+                    "access": "",
+                }
+            )
     return rows[:MAX_POINTS]
 
 
-def _address(value: str, *, north: bool = False) -> str:
+def _address(value: str, *, north: bool = False, iec104: bool = False) -> str:
     try:
         number = int(value, 16) if value.lower().startswith("0x") else int(value)
     except (TypeError, ValueError) as exc:
         raise PointTableError("点位地址必须是十进制或 0x 开头的十六进制整数") from exc
-    if not (1 if north else 0) <= number <= 65535:
+    if not (1 if north else 0) <= number <= (0xFFFFFF if north or iec104 else 65535):
         raise PointTableError("点位地址超出允许范围")
     return str(number)
 
@@ -176,9 +209,12 @@ def _merge_pairs(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         if index + 1 < len(rows):
             following = rows[index + 1]
             base = row["name"][:-1]
-            if (row["name"].endswith("H") and following["name"] == base + "L"
-                    and row["register_type"] == following["register_type"]
-                    and int(_address(following["address"])) == int(_address(row["address"])) + 1):
+            if (
+                row["name"].endswith("H")
+                and following["name"] == base + "L"
+                and row["register_type"] == following["register_type"]
+                and int(_address(following["address"])) == int(_address(row["address"])) + 1
+            ):
                 row["name"] = {"客户": "客户唯一号", "电度计量": "累计电量"}.get(base, base)
                 row["detail"] += " " + following["detail"]
                 row["count"] = "2"
@@ -199,12 +235,10 @@ def _candidate(row: dict[str, str], *, unsigned16: bool) -> dict[str, str]:
         function = "遥控" if access == "WO" else "遥信"
         data_type = "BIT"
     else:
-        function = "遥调" if access == "WO" else (
-            "遥信" if "状态" in name or "故障" in name else "遥测"
+        function = (
+            "遥调" if access == "WO" else ("遥信" if "状态" in name or "故障" in name else "遥测")
         )
-        data_type = "UINT32" if row["count"] == "2" else (
-            "UINT16" if unsigned16 else ""
-        )
+        data_type = "UINT32" if row["count"] == "2" else ("UINT16" if unsigned16 else "")
     unit, gain = _unit_gain(row["detail"])
     if access == "WO":
         name += "命令" if function == "遥控" else "下发"
@@ -221,6 +255,10 @@ def _candidate(row: dict[str, str], *, unsigned16: bool) -> dict[str, str]:
         "count": row["count"],
         "unit": unit,
         "gain": gain,
+        "offset": "0",
+        "persistence": "1" if function in {"遥测", "遥脉"} else "0",
+        "bit": "",
+        "dictionary": "",
         "source": (row["name"] + " " + row["detail"]).strip()[:180],
     }
 
@@ -228,6 +266,12 @@ def _candidate(row: dict[str, str], *, unsigned16: bool) -> dict[str, str]:
 def parse_protocol(filename: str, data: bytes, direction: str) -> dict:
     if direction not in {"south", "north"}:
         raise PointTableError("请选择南向或北向")
+    if Path(filename).suffix.lower() in {".xlsx", ".xlsm", ".csv"}:
+        from .pointtable_excel import parse_excel
+
+        return parse_excel(filename, data, direction)
+    if Path(filename).suffix.lower() == ".xls":
+        raise PointTableError("旧版XLS请先另存为XLSX，再上传解析")
     text = extract_protocol_text(filename, data)
     rows = _raw_rows(text)
     if not rows:
@@ -236,8 +280,11 @@ def parse_protocol(filename: str, data: bytes, direction: str) -> dict:
     candidates = []
     for row in rows:
         candidates.append(_candidate(row, unsigned16="16位无符" in text))
-        if (row["register_type"] == "保持寄存器" and "读写" in row["note"]
-                and any(word in row["name"] for word in ("过压", "欠压", "过流", "漏电", "定值"))):
+        if (
+            row["register_type"] == "保持寄存器"
+            and "读写" in row["note"]
+            and any(word in row["name"] for word in ("过压", "欠压", "过流", "漏电", "定值"))
+        ):
             write_row = row.copy()
             write_row["access"] = "WO"
             candidates.append(_candidate(write_row, unsigned16="16位无符" in text))
@@ -269,7 +316,11 @@ def _safe_text(value: str, label: str, *, required: bool = True) -> str:
     value = value.strip()
     if required and not value:
         raise PointTableError(f"请填写{label}")
-    if len(value) > 100 or value.startswith(("=", "+", "-", "@")) or "\n" in value or "\r" in value:
+    if (
+        len(value) > 100
+        or value.startswith(("=", "+", "-", "@"))
+        or re.search(r"[\x00-\x1f\x7f]", value)
+    ):
         raise PointTableError(f"{label}包含不安全内容")
     return value
 
@@ -279,22 +330,9 @@ def _generate_csv_unchecked(
 ) -> tuple[bytes, str]:
     if direction not in {"south", "north"}:
         raise PointTableError("请选择南向或北向")
-    if not points or len(points) > MAX_POINTS:
-        raise PointTableError("点位数量应为 1～500 个")
-    common = {}
-    if direction == "south":
-        for field in SOUTH_FIELDS:
-            value = _safe_text(fields.get(field, ""), field)
-            if field == "MODBUS设备地址":
-                if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 247:
-                    raise PointTableError("MODBUS设备地址应为 1～247 的整数")
-            elif field == "协议类型":
-                if value not in {"MODBUS-RTU", "MODBUS-TCP"}:
-                    raise PointTableError("协议类型应为 MODBUS-RTU 或 MODBUS-TCP")
-            elif not _SITE_RE.fullmatch(value):
-                raise PointTableError(f"{field}只能使用中英文、数字或下划线")
-            common[field] = value
-    elif fields:
+    if not points or len(points) > MAX_OUTPUT_POINTS:
+        raise PointTableError("展开后点位数量应为 1～20000 个")
+    if direction == "north" and fields:
         raise PointTableError("北向点表不需要南向设备字段")
     output_rows = []
     for index, point in enumerate(points, 1):
@@ -304,36 +342,82 @@ def _generate_csv_unchecked(
             raise PointTableError(f"第{index}个点的功能类型未确认")
         unit = _safe_text(point.get("unit", ""), "单位", required=False)
         if direction == "north":
-            output_rows.append(dict(zip(NORTH_COLUMNS, (
-                name, _address(point.get("north_address", ""), north=True), function, unit
-            ), strict=True)))
+            output_rows.append(
+                dict(
+                    zip(
+                        NORTH_COLUMNS,
+                        (
+                            name,
+                            _address(point.get("north_address", ""), north=True),
+                            function,
+                            unit,
+                        ),
+                        strict=True,
+                    )
+                )
+            )
             continue
+        common = _point_fields(fields, point)
+        iec104 = common["协议类型"] == "104"
         register_type = point.get("register_type", "")
         data_type = point.get("data_type", "")
         access = point.get("access", "")
-        if (register_type not in REGISTER_TYPES or data_type not in DATA_TYPES
-                or access not in {"RO", "WO"}):
+        if data_type not in DATA_TYPES or (
+            not iec104 and (register_type not in REGISTER_TYPES or access not in {"RO", "WO"})
+        ):
             raise PointTableError(f"第{index}个点的寄存器类型、数据类型或读写属性未确认")
-        if function in {"遥控", "双点遥控", "遥调"} and access != "WO":
+        if iec104 and data_type != "FLOAT":
+            raise PointTableError("当前104固定模板的数据类型应为FLOAT，请核对原表")
+        if not iec104 and function in {"遥控", "双点遥控", "遥调"} and access != "WO":
             raise PointTableError(f"第{index}个控制点应为 WO")
         try:
             count = int(point.get("count", ""))
             gain = float(point.get("gain", ""))
         except (TypeError, ValueError) as exc:
             raise PointTableError(f"第{index}个点的寄存器个数或增益未确认") from exc
-        if not 1 <= count <= 4 or not 0 < gain <= 1_000_000:
+        if not 1 <= count <= 4 or not math.isfinite(gain) or not 0 < gain <= 1_000_000:
             raise PointTableError(f"第{index}个点的寄存器个数或增益超出范围")
+        offset = point.get("offset", "0")
+        try:
+            if not math.isfinite(float(offset)):
+                raise ValueError
+        except (ValueError, TypeError) as exc:
+            raise PointTableError("偏移量必须是有限数值") from exc
+        persistence = point.get("persistence") or ("1" if function in {"遥测", "遥脉"} else "0")
+        if persistence not in {"0", "1"}:
+            raise PointTableError("是否持久化应为0或1")
+        bit = point.get("bit", "")
+        if bit and (not bit.isascii() or not bit.isdecimal() or not 0 <= int(bit) <= 65535):
+            raise PointTableError("BIT位应为0～65535的整数；位下标请按原协议确认")
+        cycle = "" if iec104 else (point.get("cycle", "0") or "0")
+        if not iec104 and (
+            not cycle.isascii() or not cycle.isdecimal() or (int(cycle) != 0 and int(cycle) < 5)
+        ):
+            raise PointTableError("采集周期应为0或不小于5的整数秒")
         row = dict.fromkeys(SOUTH_COLUMNS, "")
         row.update(common)
-        row.update({
-            "信号点名称": name, "信号地址": _address(point.get("address", "")),
-            "信号点功能类型": function, "信号点ID": str(index),
-            "信号点数据类型": data_type, "单位": unit,
-            "增益": str(point["gain"]), "偏移量": "0",
-            "MODBUS信号类型": register_type, "MODBUS读写类型": access,
-            "MODBUS寄存器个数": str(count), "MODBUS采集周期": "0",
-            "是否持久化": "1" if function in {"遥测", "遥脉"} else "0",
-        })
+        row.update(
+            {
+                "信号点名称": name,
+                "信号地址": _address(point.get("address", ""), iec104=iec104),
+                "信号点功能类型": function,
+                "信号点ID": str(index),
+                "信号点数据类型": data_type,
+                "单位": unit,
+                "增益": str(point["gain"]),
+                "偏移量": str(offset),
+                "MODBUS信号类型": "" if iec104 else register_type,
+                "MODBUS读写类型": "" if iec104 else access,
+                "MODBUS寄存器个数": str(count),
+                "MODBUS采集周期": cycle,
+                "是否持久化": persistence,
+                "BIT位": bit,
+                "字典表编码": _safe_text(point.get("dictionary", ""), "字典表编码", required=False),
+                "父设备": _safe_text(
+                    point.get("parent", "") or common.get("父设备", ""), "父设备", required=False
+                ),
+            }
+        )
         output_rows.append(row)
     columns = SOUTH_COLUMNS if direction == "south" else NORTH_COLUMNS
     output = io.StringIO(newline="")
@@ -344,15 +428,94 @@ def _generate_csv_unchecked(
     return output.getvalue().encode("utf-8-sig"), filename
 
 
-def validate_points(direction: str, fields: dict[str, str], points: list[dict[str, str]]) -> dict:
+def _point_fields(fields, point):
+    values = {key: point.get("_device_" + key, "") for key in (*SOUTH_FIELDS, "父设备")}
+    values.update({key: value for key, value in fields.items() if value.strip()})
+    protocol = values.get("协议类型", "")
+    result = {}
+    for field in SOUTH_FIELDS:
+        if protocol == "104" and field == "MODBUS设备地址":
+            result[field] = ""
+            continue
+        value = _safe_text(values.get(field, ""), field)
+        if field == "MODBUS设备地址":
+            if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 247:
+                raise PointTableError("MODBUS设备地址应为1～247的整数")
+        elif field == "协议类型":
+            if value not in {"MODBUS-RTU", "MODBUS-TCP", "104"}:
+                raise PointTableError("协议类型应为MODBUS-RTU、MODBUS-TCP或104")
+        elif not _SITE_RE.fullmatch(value):
+            raise PointTableError(f"{field}只能使用中英文、数字或下划线")
+        result[field] = value
+    result["父设备"] = values.get("父设备", "")
+    return result
+
+
+def _expand_points(direction, points, devices):
+    limit = MAX_OUTPUT_POINTS if not devices and direction == "south" and all(
+        point.get("_device_协议类型") for point in points
+    ) else MAX_POINTS
+    if not 1 <= len(points) <= limit:
+        raise PointTableError(f"点位数量应为1～{limit}个")
+    if not devices or direction == "north":
+        return points
+    if len(devices) > 200:
+        raise PointTableError("单次最多支持200台设备")
+    by_code = {}
+    protocols = set()
+    for index, device in enumerate(devices, 1):
+        code = _safe_text(device.get("设备编码", ""), f"第{index}台设备业务编号")
+        if code in by_code:
+            raise PointTableError(f"第{index}台设备业务编号{code}重复，请核对原表后修改")
+        by_code[code] = device
+        protocols.add(device.get("协议类型", ""))
+    if len(protocols) != 1:
+        raise PointTableError("不同南向协议须分别制作，不能混合104和Modbus设备")
+    if not any(point.get("device_code") for point in points):
+        if len(points) * len(devices) > MAX_OUTPUT_POINTS:
+            raise PointTableError("设备展开后超过20000个点位，请拆分制作")
+        if protocols == {"104"}:
+            raise PointTableError("104原始点表须逐点填写业务编号以关联设备")
+        return [
+            {**point, **{"_device_" + key: value for key, value in device.items()}}
+            for device in devices
+            for point in points
+        ]
+    result = []
+    for point in points:
+        code = point.get("device_code", "")
+        if not code and protocols == {"104"}:
+            raise PointTableError("104点位缺少业务编号，请先关联到具体设备")
+        if code and code not in by_code:
+            raise PointTableError(f"点位业务编号{code}找不到设备信息，请补充或核对设备表")
+        selected = [by_code[code]] if code else devices
+        for device in selected:
+            result.append({**point, **{"_device_" + key: value for key, value in device.items()}})
+            if len(result) > MAX_OUTPUT_POINTS:
+                raise PointTableError("设备展开后超过20000个点位，请拆分制作")
+    return result
+
+
+def validate_points(
+    direction: str,
+    fields: dict[str, str],
+    points: list[dict[str, str]],
+    devices: list[dict[str, str]] | None = None,
+) -> dict:
     """Return all blocking row errors and review warnings before any export."""
     errors, warnings = [], []
-    if direction not in {"south", "north"} or not 1 <= len(points) <= MAX_POINTS:
-        return {"valid": False, "errors": [{"row": 0, "message": "方向或点位数量不正确"}],
-                "warnings": []}
+    if direction not in {"south", "north"}:
+        return {
+            "valid": False,
+            "errors": [{"row": 0, "message": "方向或点位数量不正确"}],
+            "warnings": [],
+        }
+    try:
+        points = _expand_points(direction, points, devices)
+    except PointTableError as exc:
+        return {"valid": False, "errors": [{"row": 0, "message": str(exc)}], "warnings": []}
     occupied, names = {}, {}
-    widths = {"BIT": 1, "UINT16": 1, "INT16": 1, "UINT32": 2, "INT32": 2,
-              "FLOAT": 2, "DOUBLE": 4}
+    widths = {"BIT": 1, "UINT16": 1, "INT16": 1, "UINT32": 2, "INT32": 2, "FLOAT": 2, "DOUBLE": 4}
     for index, point in enumerate(points, 1):
         try:
             _generate_csv_unchecked(direction, fields, [point])
@@ -360,13 +523,24 @@ def validate_points(direction: str, fields: dict[str, str], points: list[dict[st
             errors.append({"row": index, "message": str(exc).replace("第1个", f"第{index}个")})
             continue
         name = point["name"].strip()
-        if name in names:
-            warnings.append({"row": index,
-                             "message": f"名称与第{names[name]}行相同，请确认是否不同测点"})
-        names[name] = index
+        common = _point_fields(fields, point) if direction == "south" else {}
+        device_key = (
+            common.get("通道编号", ""),
+            common.get("设备编码", ""),
+            common.get("MODBUS设备地址", ""),
+        )
+        name_key = (*device_key, name)
+        if name_key in names:
+            warnings.append(
+                {"row": index, "message": f"名称与第{names[name_key]}行相同，请确认是否不同测点"}
+            )
+        names[name_key] = index
         if direction == "north":
             addresses = [int(_address(point["north_address"], north=True))]
             register, access = "north", ""
+        elif common.get("协议类型") == "104":
+            addresses = [int(_address(point["address"], iec104=True))]
+            register, access = "104", ""
         else:
             address, count = int(_address(point["address"])), int(point["count"])
             register, access = point["register_type"], point["access"]
@@ -378,27 +552,38 @@ def validate_points(direction: str, fields: dict[str, str], points: list[dict[st
             if address + count - 1 > 65535:
                 errors.append({"row": index, "message": "寄存器范围超过65535"})
             addresses = range(address, address + count)
-            if point["function"] in {"遥控", "双点遥控", "遥调"}:
-                warnings.append({"row": index, "message": "控制点须核对厂家写入说明和现场操作授权"})
+        if point["function"] in {"遥控", "双点遥控", "遥调"}:
+            warnings.append({"row": index, "message": "控制点须核对厂家写入说明和现场操作授权"})
         for address in addresses:
-            key = (register, access, address)
+            key = (*device_key, register, access, address, point.get("bit", ""))
             if key in occupied:
-                errors.append({"row": index,
-                               "message": f"地址{address}与第{occupied[key]}行重复或重叠"})
+                errors.append(
+                    {"row": index, "message": f"地址{address}与第{occupied[key]}行重复或重叠"}
+                )
                 break
         else:
             for address in addresses:
-                occupied[(register, access, address)] = index
-    warnings.append({"row": 0,
-                     "message": "地址基数、字序、倍率及单位仍须结合厂家协议与现场读数确认"})
-    return {"valid": not errors, "errors": errors, "warnings": warnings}
+                occupied[(*device_key, register, access, address, point.get("bit", ""))] = index
+    warnings.append(
+        {"row": 0, "message": "地址基数、字序、倍率及单位仍须结合厂家协议与现场读数确认"}
+    )
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "output_points": len(points),
+    }
 
 
 def generate_csv(
-    direction: str, fields: dict[str, str], points: list[dict[str, str]]
+    direction: str,
+    fields: dict[str, str],
+    points: list[dict[str, str]],
+    devices: list[dict[str, str]] | None = None,
 ) -> tuple[bytes, str]:
-    result = validate_points(direction, fields, points)
+    result = validate_points(direction, fields, points, devices)
     if not result["valid"]:
-        raise PointTableError("；".join(
-            f"第{item['row']}行：{item['message']}" for item in result["errors"][:8]))
-    return _generate_csv_unchecked(direction, fields, points)
+        raise PointTableError(
+            "；".join(f"第{item['row']}行：{item['message']}" for item in result["errors"][:8])
+        )
+    return _generate_csv_unchecked(direction, fields, _expand_points(direction, points, devices))

@@ -1,6 +1,6 @@
 # 光伏电站技术支持 Agent
 
-[![version](https://img.shields.io/badge/version-1.16.0-blue)](CHANGELOG.md)
+[![version](https://img.shields.io/badge/version-1.17.1-blue)](CHANGELOG.md)
 [![python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 [![license](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
 
@@ -9,7 +9,7 @@
 
 Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；管理功能在遮罩窗口内打开。新建会话立即保存到数据库。
 
-当前版本 **v1.16.0**，提供 Windows 本机桌面客户端、自动备份与恢复校验、离线回答验收和离线安装/升级/回退。适合小范围试用，回答质量与协议解析仍需结合实际资料和现场结果验收。部署步骤见 [本机运行与验收](docs/local_operations.md)。
+当前版本 **v1.17.1**，提供 Windows 本机桌面客户端、自动备份与恢复校验、离线回答验收和离线安装/升级/回退。适合小范围试用，回答质量与协议解析仍需结合实际资料和现场结果验收。部署步骤见 [本机运行与验收](docs/local_operations.md)。
 
 图片可连续粘贴或多选上传，暂存预览后点击发送；最多6张，逐张本机识图整理后合并分析。发送失败保留草稿。
 
@@ -33,7 +33,7 @@ Windows 桌面客户端使用独立窗口，左侧历史对话、右侧聊天；
 |---|---|
 | 现场问题 | 从本机资料库检索依据，配置远程模型后整理回答；显示资料引用，支持追问和反馈 |
 | 学习刷题 | 识别题干及选项，结合题库、检索资料和模型给出选项与解释；依据不足时提示核对 |
-| 点表制作 | 选择南向或北向，上传设备协议 Word / 文字版 PDF，解析候选点位、手动补充字段并导出 CSV |
+| 点表制作 | 选择南向或北向，上传 Excel / CSV 点表或设备协议 Word / 文字版 PDF，按固定模板提取字段，下载 Excel 核对版或校验后的 CSV |
 | 账号权限 | admin 管理账号与资料；user 使用业务功能、查看自己的会话和排查记录、修改密码 |
 | 管理中心 | 运行概况、资料版本及分库管理、启用/停用、操作记录、SQLite 备份下载 |
 

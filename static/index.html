@@ -380,7 +380,7 @@
     </div>
     <div class="side-body">
       <button class="ghost" id="newBtn" style="width:100%">+ 新建会话</button>
-      <div class="side-label" style="margin-top:16px">历史会话</div>
+      <div class="side-label" style="margin-top:16px" title="会话创建时间，按北京时间显示">历史会话</div>
       <div id="sessionList"></div>
       <div class="side-label" id="knowledgeLabel" style="margin-top:18px">知识库</div>
       <button class="ghost" id="uploadBtn" style="width:100%">导入文档（PDF/TXT/MD）</button>
@@ -429,6 +429,7 @@
 </div>
 
 <script src="/static/answer-format.js?v=1.15.5"></script>
+<script src="/static/time-format.js?v=1.16.1"></script>
 <script>
 const state = { sessionId: null, userId: null, csrfToken: null, busy: false, pendingImages: [] };
 
@@ -436,7 +437,7 @@ const WORKFLOWS = {
   pointTable: {
     label: '点表制作',
     title: '点表制作',
-    description: '选择南向或北向，上传设备协议，再补齐缺失信息。',
+    description: '选择南向或北向，上传Excel点表或设备协议，按固定模板填充并补齐缺项。',
     placeholder: '也可以在这里询问点表规则或设备协议',
   },
 };
@@ -705,7 +706,7 @@ function addBot(payload) {
   const nextAction = payload.next_action || ((payload.answer || '').startsWith('点表制作：') ? 'point_table' : null);
   if (nextAction) {
     const action = document.createElement('button'); action.className = 'ghost'; action.type = 'button';
-    action.textContent = nextAction === 'point_table' ? '上传协议并制作点表' : '填写工具参数';
+    action.textContent = nextAction === 'point_table' ? '上传点表或协议并制作' : '填写工具参数';
     action.onclick = () => {
       if (state.busy) return;
       if (nextAction === 'point_table') {
@@ -1052,7 +1053,7 @@ async function loadSessions(offset = 0) {
       const row = document.createElement('div');
       row.className = 'session' + (session.id === state.sessionId ? ' active' : '');
       row.title = session.title || session.id;
-      row.innerHTML = esc(session.title || session.id.slice(0, 8)) + '<small>' + new Date(session.created_at).toLocaleString('zh-CN') + '</small>';
+      row.innerHTML = esc(session.title || session.id.slice(0, 8)) + '<small>' + formatAgentTime(session.created_at) + '</small>';
       row.onclick = function () { openSession(session.id); closeHistorySidebar(); };
       box.appendChild(row);
     });
@@ -1160,21 +1161,23 @@ const workflowPanel = $('workflowPanel');
 async function showPointTableForm() {
   workflowPanel.innerHTML =
     '<button class="close" type="button" aria-label="关闭点表制作">✕</button>' +
-    '<strong>点表制作</strong><div>先选南向或北向，再上传这次设备的协议。</div>' +
+    '<strong>点表制作</strong><div>选择南向或北向，上传一份数据文件，自动提取数据并填写固定模板。南向24列、北向4列，无需选择协议或另传模板。</div>' +
     '<div class="pointtable-form"><div class="pointtable-fields">' +
     '<label for="ptDirection">方向<select id="ptDirection"><option value="south">南向</option>' +
     '<option value="north">北向</option></select></label>' +
-    '<label for="ptFile">设备协议（Word/PDF）<input id="ptFile" type="file" ' +
-    'accept=".doc,.docx,.pdf"></label></div>' +
-    '<div class="pointtable-actions"><button class="ghost" id="ptParse" type="button">解析协议</button>' +
+    '<label for="ptFile">上传数据文件（Excel/CSV/Word/PDF）<input id="ptFile" type="file" ' +
+    'accept=".xlsx,.xlsm,.csv,.doc,.docx,.pdf"></label></div>' +
+    '<div class="pointtable-actions"><button class="ghost" id="ptParse" type="button">解析所选文件</button>' +
     '<span class="pointtable-note">仅在本机解析，不发送整份协议给 DeepSeek。</span></div>' +
     '<div class="err" id="ptError" role="alert"></div>' +
     '<div id="ptParsed" hidden><div id="ptSummary" class="pointtable-note"></div>' +
     '<div class="pointtable-fields" id="ptFields"></div>' +
+    '<div id="ptDevices" class="pointtable-scroll"></div>' +
     '<div id="ptWarnings" class="pointtable-note"></div>' +
     '<div class="pointtable-scroll"><table><thead id="ptHead"></thead><tbody id="ptRows"></tbody></table></div>' +
     '<div class="pointtable-actions"><button class="ghost" id="ptAddRow" type="button">添加点位</button>' +
     '<button class="ghost" id="ptValidate" type="button">检查点表</button>' +
+    '<button class="ghost" id="ptReview" type="button">下载 Excel 核对版</button>' +
     '<button class="primary" id="ptGenerate" type="button">生成并下载 CSV</button></div>' +
     '<div id="ptValidation" class="pointtable-note" role="status"></div></div></div>';
   workflowPanel.querySelector('.close').onclick = closeWorkflow;
@@ -1182,18 +1185,32 @@ async function showPointTableForm() {
   const fieldNames = {
     name: '信号名称', address: '协议地址', north_address: '北向点号',
     function: '功能类型', register_type: '寄存器类型', access: '读写',
-    data_type: '数据类型', count: '寄存器数', gain: '倍率', unit: '单位',
+    data_type: '数据类型', count: '寄存器数', gain: '增益（原值）', unit: '单位',
+    offset: '偏移量', persistence: '是否持久化', bit: 'BIT位', dictionary: '字典表编码',
+    device_code: '业务编号（对应设备）',
+    '_device_通道编号': '通道编号', '_device_设备编码': '设备编码',
+    '_device_协议类型': '协议类型', '_device_设备型号': '设备型号',
+    '_device_设备类型': '设备类型', '_device_厂商名称': '厂商名称',
+    '_device_MODBUS设备地址': 'Modbus设备地址', '_device_电站编号': '电站编号',
   };
   const options = {
     function: ['', '遥信', '双点遥信', '遥测', '遥控', '双点遥控', '遥调', '遥脉'],
     register_type: ['', '线圈', '输入离散量', '保持寄存器', '输入寄存器'],
     access: ['', 'RO', 'WO'],
     data_type: ['', 'BIT', 'UINT16', 'INT16', 'UINT32', 'INT32', 'FLOAT', 'DOUBLE'],
+    persistence: ['', '0', '1'],
   };
   function pointColumns() {
-    return parsed.direction === 'south'
-      ? ['name', 'address', 'function', 'register_type', 'access', 'data_type', 'count', 'gain', 'unit']
-      : ['name', 'north_address', 'function', 'unit'];
+    if (parsed.direction === 'north') return ['name', 'north_address', 'function', 'unit'];
+    const columns = parsed.protocol === '104'
+      ? ['name', 'address', 'function', 'data_type', 'gain', 'unit']
+      : ['name', 'address', 'function', 'register_type', 'access', 'data_type', 'count', 'gain', 'unit'];
+    columns.push('offset', 'persistence', 'bit', 'dictionary');
+    if (!parsed.merged && parsed.points.some(point => point.device_code)) columns.unshift('device_code');
+    if (parsed.merged) columns.unshift('_device_通道编号', '_device_设备编码',
+      '_device_协议类型', '_device_设备型号', '_device_设备类型', '_device_厂商名称',
+      '_device_MODBUS设备地址', '_device_电站编号');
+    return columns;
   }
   function readPoints() {
     return [...$('ptRows').querySelectorAll('tr')].map((row) => {
@@ -1229,11 +1246,15 @@ async function showPointTableForm() {
         }
         control.dataset.key = key;
         control.value = point[key] || '';
+        if (point['_device_协议类型'] === '104' &&
+            ['register_type', 'access', 'count', '_device_MODBUS设备地址'].includes(key)) {
+          control.disabled = true;
+        }
         cell.appendChild(control);
         if (key === 'name' && point.source) {
           const source = document.createElement('small');
           source.className = 'pointtable-note';
-          source.textContent = '协议：' + point.source;
+          source.textContent = '位置：' + point.source;
           cell.appendChild(source);
         }
         row.appendChild(cell);
@@ -1250,10 +1271,45 @@ async function showPointTableForm() {
       $('ptRows').appendChild(row);
     });
   }
+  function readDevices() {
+    return [...$('ptDevices').querySelectorAll('tbody tr')].map((row, index) => {
+      const device = { ...parsed.devices[index] };
+      row.querySelectorAll('[data-field]').forEach(control => {
+        device[control.dataset.field] = control.value.trim();
+      });
+      return device;
+    });
+  }
+  function renderDevices() {
+    const box = $('ptDevices'); box.innerHTML = '';
+    if (!parsed.devices?.length) return;
+    const heading = document.createElement('p');
+    heading.textContent = '设备信息（来源原值，可补充或纠正；业务编号用于关联点位）';
+    box.appendChild(heading);
+    const columns = ['通道编号', '设备类型', '设备型号', '厂商名称', '设备编码', '协议类型'];
+    if (parsed.protocol !== '104') columns.push('MODBUS设备地址');
+    columns.push('电站编号', '父设备');
+    const table = document.createElement('table');
+    const head = document.createElement('thead');
+    head.innerHTML = '<tr>' + columns.map(key => '<th>' + (key === '设备编码' ? '业务编号/设备编码' : key) + '</th>').join('') + '</tr>';
+    table.appendChild(head);
+    const body = document.createElement('tbody');
+    parsed.devices.forEach(device => {
+      const row = document.createElement('tr');
+      columns.forEach(key => {
+        const cell = document.createElement('td'), control = document.createElement('input');
+        control.dataset.field = key; control.value = device[key] || ''; control.maxLength = 100;
+        cell.appendChild(control); row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+    table.appendChild(body); box.appendChild(table);
+  }
   function renderParsed() {
     $('ptParsed').hidden = false;
     $('ptSummary').textContent = parsed.source_name + ' · 识别出 ' + parsed.points.length +
-      ' 个候选点位，请核对后生成。';
+      ' 个原始点位' + (parsed.devices?.length ? '、' + parsed.devices.length + ' 台设备' : '') +
+      '；协议：' + (parsed.protocol || parsed.suggested_fields?.['协议类型'] || '待确认') + '。Excel用于核对，CSV检查通过后下载。';
     $('ptWarnings').textContent = parsed.warnings.join(' ');
     $('ptFields').innerHTML = '';
     parsed.common_fields.forEach((field) => {
@@ -1266,6 +1322,7 @@ async function showPointTableForm() {
       label.appendChild(input);
       $('ptFields').appendChild(label);
     });
+    renderDevices();
     renderPoints();
   }
   function resetParsed() { parsed = null; $('ptParsed').hidden = true; $('ptError').textContent = ''; }
@@ -1273,7 +1330,7 @@ async function showPointTableForm() {
   $('ptFile').onchange = resetParsed;
   $('ptParse').onclick = async function () {
     const file = $('ptFile').files[0];
-    if (!file) { $('ptError').textContent = '请先选择设备协议文件'; return; }
+    if (!file) { $('ptError').textContent = '请上传一份数据文件'; return; }
     const form = new FormData();
     form.append('direction', $('ptDirection').value);
     form.append('file', file);
@@ -1288,7 +1345,9 @@ async function showPointTableForm() {
   $('ptAddRow').onclick = function () {
     parsed.points = readPoints();
     parsed.points.push({ name: '', address: '', north_address: '', function: '',
-      register_type: '', access: '', data_type: '', count: '1', gain: '1', unit: '' });
+      register_type: '', access: '', data_type: parsed.protocol === '104' ? 'FLOAT' : '',
+      count: '1', gain: '1', unit: '', offset: '0', persistence: '0', bit: '', dictionary: '',
+      device_code: parsed.protocol === '104' ? '' : undefined });
     renderPoints();
   };
   function pointPayload() {
@@ -1297,13 +1356,13 @@ async function showPointTableForm() {
       fields[control.name] = control.value.trim();
     });
     const points = readPoints();
-    return { direction: parsed.direction, fields, points };
+    return { direction: parsed.direction, fields, points, devices: readDevices() };
   }
   async function checkPoints(payload) {
     const result = await api('/point-tables/validate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     });
-    $('ptValidation').textContent = (result.valid ? '未发现阻止生成的错误。' : '请先修改以下错误：') + '\n' +
+    $('ptValidation').textContent = (result.valid ? '检查通过，导出 ' + result.output_points + ' 个点位。' : '请先修改以下错误；可下载 Excel 待确认核对版：') + '\n' +
       result.errors.map(item => '第' + item.row + '行：' + item.message).join('\n') + '\n' +
       result.warnings.map(item => (item.row ? '第' + item.row + '行：' : '') + item.message).join('\n');
     $('ptValidation').style.whiteSpace = 'pre-wrap';
@@ -1315,14 +1374,15 @@ async function showPointTableForm() {
     catch (error) { $('ptError').textContent = error.message; }
     finally { $('ptValidate').disabled = false; }
   };
-  $('ptGenerate').onclick = async function () {
+  async function downloadPointTable(outputFormat) {
     const payload = pointPayload();
     $('ptError').textContent = '';
     $('ptGenerate').disabled = true;
     try {
       const validation = await checkPoints(payload);
-      if (!validation.valid) throw new Error('点表检查未通过，请按具体行号修改后重试');
-      if (!window.confirm('请确认已经核对地址基数、字序、倍率和单位。CSV仅供人工确认后使用，是否继续下载？')) return;
+      if (!validation.valid && outputFormat === 'csv') throw new Error('点表检查未通过，请修改或先下载 Excel 核对版');
+      payload.output_format = outputFormat;
+      if (outputFormat === 'csv' && !window.confirm('请确认已经核对地址基数、字序、倍率和单位。CSV仅供人工确认后使用，是否继续下载？')) return;
       const res = await fetch('/point-tables/generate', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrfToken || '' },
@@ -1336,12 +1396,15 @@ async function showPointTableForm() {
       const url = URL.createObjectURL(await res.blob());
       const link = document.createElement('a');
       link.href = url;
-      link.download = '点表_' + (parsed.direction === 'south' ? '南向' : '北向') + '.csv';
+      link.download = '点表_' + (parsed.direction === 'south' ? '南向' : '北向') + '_' + (parsed.protocol || '协议') +
+        (outputFormat === 'xlsx' ? (validation.valid ? '_核对版.xlsx' : '_待确认核对版.xlsx') : '.csv');
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) { $('ptError').textContent = error.message; }
     finally { $('ptGenerate').disabled = false; }
-  };
+  }
+  $('ptGenerate').onclick = () => downloadPointTable('csv');
+  $('ptReview').onclick = () => downloadPointTable('xlsx');
 }
 function closeWorkflow() {
   workflowPanel.hidden = true;
@@ -1417,7 +1480,7 @@ async function loadOps() {
       const note = document.createElement('p');
       note.textContent = '版本 ' + data.version + ' · 身份验证' + (data.auth_enabled ? '已开启' : '未开启') +
         ' · 远程模型' + (data.model_enabled ? '已配置' : '未配置') +
-        ' · 最近备份：' + (data.latest_backup[0]?.created_at || '暂无');
+        ' · 最近备份：' + (data.latest_backup[0] ? formatAgentTime(data.latest_backup[0].created_at) : '暂无');
       box.appendChild(note);
     } else if (ops.tab === 'documents') {
       const upload = document.createElement('button'); upload.className = 'ghost'; upload.textContent = '导入资料';
@@ -1462,7 +1525,7 @@ async function loadOps() {
     } else if (ops.tab === 'audit') {
       data.items.forEach((item) => {
         const row = document.createElement('div'); row.className = 'ops-row';
-        row.textContent = new Date(item.created_at).toLocaleString('zh-CN') + ' · ' + item.actor + ' · ' +
+        row.textContent = formatAgentTime(item.created_at) + ' · ' + item.actor + ' · ' +
           (auditNames[item.action] || item.action);
         box.appendChild(row);
       });

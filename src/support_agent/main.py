@@ -88,7 +88,7 @@ from .services.input_routing import is_quiz
 from .services.issue_input import prepare_screenshot_question
 from .services.llm import OpenAICompatibleClient
 from .services.pointtable import MAX_BYTES as MAX_PROTOCOL_BYTES
-from .services.pointtable import PointTableError, generate_csv, parse_protocol, validate_points
+from .services.pointtable import PointTableError, generate_csv, validate_points
 from .services.privacy import classify_question
 from .services.quiz import answer_question, recognize_image
 from .services.rag import RAGService
@@ -157,7 +157,7 @@ app.include_router(data_router)
 @app.post("/point-tables/validate")
 async def validate_point_table(request: PointTableGenerateRequest,
                                user: Annotated[UserAccount | None, Depends(current_user)]) -> dict:
-    return validate_points(request.direction, request.fields, request.points)
+    return validate_points(request.direction, request.fields, request.points, request.devices)
 
 DbDep = Annotated[AsyncSession, Depends(get_db)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
@@ -354,13 +354,27 @@ async def reset_user_password(
 
 @app.post("/point-tables/parse")
 async def parse_point_table_protocol(
-    user: AuthenticatedUser, file: UploadDep, direction: Annotated[str, Form()],
+    user: AuthenticatedUser, direction: Annotated[str, Form()],
+    file: Annotated[UploadFile | None, File()] = None,
+    files: Annotated[list[UploadFile] | None, File()] = None,
 ) -> dict:
     if user is None:
         raise HTTPException(403, "需要登录账号")
-    data = await file.read(MAX_PROTOCOL_BYTES + 1)
+    uploads = ([file] if file else []) + (files or [])
+    if not 1 <= len(uploads) <= 10:
+        raise HTTPException(422, "每次请选择1～10个来源文件")
+    sources = []
+    total = 0
+    for upload in uploads:
+        data = await upload.read(MAX_PROTOCOL_BYTES + 1)
+        total += len(data)
+        if len(data) > MAX_PROTOCOL_BYTES or total > 20 * 1024 * 1024:
+            raise HTTPException(422, "单文件不得超过10MB，合计不得超过20MB")
+        sources.append((upload.filename or "", data))
     try:
-        result = await run_in_threadpool(parse_protocol, file.filename or "", data, direction)
+        from .services.pointtable_excel import parse_protocol_batch
+
+        result = await run_in_threadpool(parse_protocol_batch, sources, direction)
     except PointTableError as exc:
         raise HTTPException(422, str(exc)) from exc
     return result
@@ -373,18 +387,28 @@ async def make_point_table(
     if user is None:
         raise HTTPException(403, "需要登录账号")
     try:
-        content, filename = generate_csv(body.direction, body.fields, body.points)
+        if body.output_format == "xlsx":
+            from .services.pointtable_workbook import generate_review_workbook
+
+            content, filename = await run_in_threadpool(
+                generate_review_workbook, body.direction, body.fields, body.points, body.devices)
+        else:
+            content, filename = await run_in_threadpool(
+                generate_csv, body.direction, body.fields, body.points, body.devices)
     except PointTableError as exc:
         raise HTTPException(422, str(exc)) from exc
     db.add(AuditLog(actor=user.id, action="point_table_generated", resource=body.direction,
-                    detail={"points": len(body.points)}))
+                    detail={"points": len(body.points), "devices": len(body.devices),
+                            "format": body.output_format}))
     await db.commit()
     return Response(
         content=content,
-        media_type="text/csv; charset=utf-8",
+        media_type=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    if body.output_format == "xlsx" else "text/csv; charset=utf-8"),
         headers={
             "Content-Disposition": (
-                "attachment; filename=point-table.csv; filename*=UTF-8''" + quote(filename)
+                "attachment; filename=point-table." + body.output_format + "; filename*=UTF-8''"
+                + quote(filename)
             ),
             "Cache-Control": "no-store",
         },

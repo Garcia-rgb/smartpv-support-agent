@@ -1,7 +1,11 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+
+from .time_utils import as_utc
+
+UtcDatetime = Annotated[datetime, AfterValidator(as_utc)]
 
 
 class Citation(BaseModel):
@@ -73,7 +77,7 @@ class ManagedUser(BaseModel):
     username: str
     role: Literal["user"]
     active: bool
-    created_at: datetime
+    created_at: UtcDatetime
 
 
 class ManagedUserList(BaseModel):
@@ -88,7 +92,9 @@ class UserCredentialResponse(BaseModel):
 class PointTableGenerateRequest(BaseModel):
     direction: Literal["south", "north"]
     fields: dict[str, str] = Field(default_factory=dict)
-    points: list[dict[str, str]] = Field(min_length=1, max_length=500)
+    points: list[dict[str, str]] = Field(min_length=1, max_length=20000)
+    devices: list[dict[str, str]] = Field(default_factory=list, max_length=200)
+    output_format: Literal["csv", "xlsx"] = "csv"
 
 
 class ChatRequest(BaseModel):
@@ -192,14 +198,14 @@ class MessageView(BaseModel):
     role: str
     content: str
     citations: list[dict]
-    created_at: datetime
+    created_at: UtcDatetime
     images: list[MessageImageView] = Field(default_factory=list)
 
 
 class SessionResponse(BaseModel):
     id: str
     user_id: str
-    created_at: datetime
+    created_at: UtcDatetime
     messages: list[MessageView]
 
 
@@ -208,7 +214,7 @@ class SessionSummary(BaseModel):
 
     id: str
     user_id: str
-    created_at: datetime
+    created_at: UtcDatetime
     title: str = ""
 
 
